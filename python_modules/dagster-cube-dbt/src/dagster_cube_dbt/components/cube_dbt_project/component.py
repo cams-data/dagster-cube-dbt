@@ -18,7 +18,9 @@ import yaml
 from dagster._annotations import public
 from dagster.components.resolved.model import Resolver
 from dagster_dbt.components.dbt_project.component import DbtProjectComponent
+from dagster_dbt.dagster_dbt_translator import validate_translator
 from dagster_dbt.dbt_manifest import validate_manifest
+from dagster_dbt.utils import ASSET_RESOURCE_TYPES
 
 from dagster_cube_dbt.generation import generate_cubes
 from dagster_cube_dbt.merge import discover_patch_files, merge_documents, resolve_extends
@@ -322,6 +324,21 @@ class CubeDbtProjectComponent(DbtProjectComponent):
     ) -> dg.Definitions:
         dbt_defs = super().build_defs_from_state(context, state_path)
 
+        # `self.dbt_project` (and anything built on it, like `self.asset_key_for_model`) is
+        # dagster_dbt's own *live* lookup -- it always calls `self._project_manager.get_project(
+        # None)`, which for a real (non-`DbtProject`-literal) `project` config resolves straight
+        # to the *original* configured project directory, never the local copy `write_state_to_path`
+        # cached under `state_path`. Using it anywhere below, at deploy time, would require that
+        # original directory to still exist on disk -- exactly the assumption a state-backed
+        # component exists to avoid. `super().build_defs_from_state` above already gets this
+        # right internally (`get_project(state_path)`); recompute the same state-aware
+        # project/manifest ourselves so nothing below -- `_dbt_model_asset_key_or_none`, the
+        # generated op's `name`/`pool`, the sensor's `name` -- ever falls through to the live
+        # lookup instead.
+        state_aware_project = self._project_manager.get_project(state_path)
+        self._state_aware_manifest = validate_manifest(state_aware_project.manifest_path)
+        self._state_aware_project = state_aware_project
+
         state_file = state_path.parent / CUBE_STATE_FILENAME if state_path else None
         if state_file is None or not state_file.exists():
             raise dg.DagsterInvalidDefinitionError(
@@ -366,10 +383,10 @@ class CubeDbtProjectComponent(DbtProjectComponent):
 
         @dg.multi_asset(
             specs=specs,
-            name=f"{self.dbt_project.name}_cubes",
+            name=f"{state_aware_project.name}_cubes",
             can_subset=True,
             required_resource_keys={self.promoter_resource_key},
-            pool=self.promotion_pool or f"{self.dbt_project.name}_cube_promotion",
+            pool=self.promotion_pool or f"{state_aware_project.name}_cube_promotion",
         )
         def _cube_assets(context: dg.AssetExecutionContext):
             promoter = getattr(context.resources, self.promoter_resource_key)
@@ -394,7 +411,7 @@ class CubeDbtProjectComponent(DbtProjectComponent):
         # custom sensor otherwise starts STOPPED (unlike the always-on default sensor), which
         # would silently turn automation off for these assets until someone starts it by hand.
         cube_sensor = dg.AutomationConditionSensorDefinition(
-            name=f"{self.dbt_project.name}_cube_automation_condition_sensor",
+            name=f"{state_aware_project.name}_cube_automation_condition_sensor",
             target=dg.AssetSelection.assets(*[spec.key for spec in specs]),
             default_status=dg.DefaultSensorStatus.RUNNING,
         )
@@ -412,10 +429,21 @@ class CubeDbtProjectComponent(DbtProjectComponent):
         return dg.AssetKey([VIEW_KEY_PREFIX, name])
 
     def _dbt_model_asset_key_or_none(self, name: str) -> dg.AssetKey | None:
-        try:
-            return self.asset_key_for_model(name)
-        except KeyError:
+        # Deliberately not `self.asset_key_for_model(name)` -- see the comment in
+        # `build_defs_from_state` on why that would need the live dbt project directory to
+        # exist at deploy time. Replicates its exact lookup logic, just against the
+        # state-aware manifest/project set there instead.
+        manifest = self._state_aware_manifest
+        matching_model_ids = [
+            unique_id
+            for unique_id, value in manifest["nodes"].items()
+            if value["name"] == name and value["resource_type"] in ASSET_RESOURCE_TYPES
+        ]
+        if not matching_model_ids:
             return None
+        return validate_translator(self.translator).get_asset_spec(
+            manifest, next(iter(matching_model_ids)), self._state_aware_project
+        ).key
 
     @public
     def get_cube_asset_spec(self, cube: Mapping[str, Any]) -> dg.AssetSpec:
