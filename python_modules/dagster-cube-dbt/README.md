@@ -1,5 +1,8 @@
 # dagster-cube-dbt
 
+[![PyPI](https://img.shields.io/pypi/v/dagster-cube-dbt)](https://pypi.org/project/dagster-cube-dbt/)
+[![Docs](https://readthedocs.org/projects/dagster-cube-dbt/badge/?version=latest)](https://dagster-cube-dbt.readthedocs.io/)
+
 A Dagster Component (`CubeDbtProjectComponent`) that extends `dagster_dbt.DbtProjectComponent`
 to also generate a [Cube](https://cube.dev) semantic-layer schema from your dbt project's
 manifest, exposing each generated cube as a virtual, pass-through Dagster asset.
@@ -722,7 +725,7 @@ resolve it correctly in the real output at its own runtime.
 `deps` is the one thing deliberately *not* flattened through `extends` chains this way: a
 cube's dependency is always its immediate `extends` parent's own cube asset (a single hop),
 not whatever dbt model sits at the root of the chain — see
-[Renaming the generated cube](#renaming-the-generated-cube-with-metacubename--metacubesuffix)
+[Renaming the generated cube](#renaming-the-generated-cube-with-metacubename-metacubesuffix)
 above for why.
 
 ## Column schema metadata
@@ -758,18 +761,19 @@ any other constraint from dbt.
 ## Full example
 
 Every piece above is exercised together in
-[`dagster-cube-dbt-tests`](../dagster-cube-dbt-tests), a small real dbt + Dagster + Cube
-project used to develop and test this library against (`dg dev`-able, not just unit tests):
+[`dagster-cube-dbt-tests`](https://github.com/cams-data/dagster-cube-dbt/tree/main/python_modules/dagster-cube-dbt-tests),
+a small real dbt + Dagster + Cube project used to develop and test this library against
+(`dg dev`-able, not just unit tests):
 
-- [`defs/dbt_cubes/defs.yaml`](../dagster-cube-dbt-tests/src/dagster_cube_dbt_tests/defs/dbt_cubes/defs.yaml) —
+- [`defs/dbt_cubes/defs.yaml`](https://github.com/cams-data/dagster-cube-dbt/blob/main/python_modules/dagster-cube-dbt-tests/src/dagster_cube_dbt_tests/defs/dbt_cubes/defs.yaml) —
   the component itself, scoped to mart-layer models via `cube_select`.
-- [`defs/dbt_cubes/patches/`](../dagster-cube-dbt-tests/src/dagster_cube_dbt_tests/defs/dbt_cubes/patches) —
+- [`defs/dbt_cubes/patches/`](https://github.com/cams-data/dagster-cube-dbt/tree/main/python_modules/dagster-cube-dbt-tests/src/dagster_cube_dbt_tests/defs/dbt_cubes/patches) —
   four merge-patch files: adding measures/joins to a dbt-derived cube
   (`journey_samples.yaml`), removing a dimension (`remove_journey_type.yaml`), a wholly
   hand-written cube with no backing dbt model (`exchange_rates.yaml`), and a `views:` entry
   composing two cubes (`journeys_overview_view.yaml`) — one concept per file, though nothing
   stops you from combining them.
-- [`defs/cube_promoter.py`](../dagster-cube-dbt-tests/src/dagster_cube_dbt_tests/defs/cube_promoter.py) —
+- [`defs/cube_promoter.py`](https://github.com/cams-data/dagster-cube-dbt/blob/main/python_modules/dagster-cube-dbt-tests/src/dagster_cube_dbt_tests/defs/cube_promoter.py) —
   a plain Python defs module (not YAML) binding `LocalFileCubeFilePromoter` under
   `cube_file_promoter`, the pattern any real `CubeFilePromoter` implementation follows.
 
@@ -796,7 +800,7 @@ the fixture, or anything that shells out to the dbt CLI.
 
 ## Releasing
 
-Versioning, [CHANGELOG.md](CHANGELOG.md), git tags, and GitHub Releases are all generated
+Versioning, [CHANGELOG.md](https://github.com/cams-data/dagster-cube-dbt/blob/main/python_modules/dagster-cube-dbt/CHANGELOG.md), git tags, and GitHub Releases are all generated
 automatically by [python-semantic-release](https://python-semantic-release.readthedocs.io/)
 from [Conventional Commits](https://www.conventionalcommits.org/) — nobody hand-edits the
 version or the changelog. This means every commit message on `main`/`next` actually matters:
@@ -814,7 +818,7 @@ publishes a **prerelease** (`0.2.0rc1`, `0.2.0rc2`, ...) to the same PyPI projec
 construction, since `pip install dagster-cube-dbt` never resolves to a prerelease on its own;
 trying one requires `pip install --pre dagster-cube-dbt` or an exact version pin. Merge `next`
 into `main` when a preview is ready to become the real release. See
-[`.github/workflows/release.yml`](../../.github/workflows/release.yml).
+[`.github/workflows/release.yml`](https://github.com/cams-data/dagster-cube-dbt/blob/main/.github/workflows/release.yml).
 
 Publishing itself uses PyPI's [Trusted Publishing](https://docs.pypi.org/trusted-publishers/)
 (OIDC) — the workflow authenticates directly to PyPI with a short-lived token scoped to this
@@ -836,3 +840,35 @@ do (not something CI or an agent can do on your behalf):
 
 After that, every push to `main`/`next` that contains a releasable commit publishes itself —
 no further manual steps.
+
+## Documentation
+
+The doc site (`mkdocs.yml`, `docs/`, both at the repo root -- outside this package directory,
+since `mkdocstrings` needs a repo-root-relative view to point at `src/` correctly) is built
+with [MkDocs](https://www.mkdocs.org/) + [Material](https://squidfunk.github.io/mkdocs-material/)
++ [mkdocstrings](https://mkdocstrings.github.io/), hosted on
+[Read the Docs](https://readthedocs.org/). `docs/index.md` and `docs/changelog.md` aren't
+hand-written -- they pull in this README and `CHANGELOG.md` verbatim at build time (via
+`pymdownx.snippets`), so there's exactly one source of truth for the prose content; only
+`docs/reference.md` (the API reference, generated from this library's own docstrings) has
+real content of its own. Build locally with:
+
+```
+uv run --project python_modules/dagster-cube-dbt --extra docs mkdocs build --strict
+```
+
+(run from the repo root -- `pymdownx.snippets`' `base_path` resolves relative to the working
+directory `mkdocs` is invoked from, not `mkdocs.yml`'s location). `--strict` fails the build on
+any broken link, anchor, or snippet reference; CI runs exactly this on every PR (`docs` job in
+`ci.yml`).
+
+One-time, manual setup on Read the Docs' side (only a maintainer with an RTD account can do
+this):
+
+1. Sign in to [readthedocs.org](https://readthedocs.org/) with GitHub and import this repo as
+   a new project. RTD auto-detects `.readthedocs.yaml` at the repo root.
+2. Confirm the project slug is `dagster-cube-dbt` (or update the badge URLs in this README and
+   `mkdocs.yml`'s `site_url` if it ends up different).
+
+After that, every push triggers a doc rebuild automatically, and RTD serves versioned docs
+(`latest`, plus one per released tag) without further configuration.

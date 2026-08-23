@@ -25,6 +25,16 @@ dependencies = [
     "deepmerge",
 ]
 
+[project.optional-dependencies]
+# Doc-site build tooling only -- nobody installs this to use the library. Kept as an extra
+# (`pip install .[docs]`) rather than a dependency-group so Read the Docs' `extra_requirements`
+# config option can reference it directly.
+docs = [
+    "mkdocs",
+    "mkdocs-material",
+    "mkdocstrings[python]",
+]
+
 [project.urls]
 Homepage = "https://github.com/cams-data/dagster-cube-dbt"
 Repository = "https://github.com/cams-data/dagster-cube-dbt"

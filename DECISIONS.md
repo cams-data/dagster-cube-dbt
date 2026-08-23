@@ -2300,3 +2300,83 @@ output, not inferred from Hatch's naming convention secondhand.
   Python 3.13 isn't installed on this dev machine, so that leg is verified structurally
   (`hatch env show` lists it correctly) and will get its first real execution in CI.
 - All workflow YAML re-validated (`yaml.safe_load`) after each edit.
+
+## Phase 35 — a docs site: MkDocs + Material + mkdocstrings on Read the Docs
+
+**User's request:** "The next step is to create static docs and host them on a docs site.
+What would usually be the goto for a python library like this?" Recommended MkDocs + Material
++ mkdocstrings (the current default across most modern Python tooling -- FastAPI, Typer,
+httpx, Ruff, uv itself) over Sphinx + Read the Docs (the older, more traditional default,
+stronger autodoc but a rougher Markdown-authoring experience), and Read the Docs over GitHub
+Pages as the host specifically because it handles multi-version docs (v0.1 vs v0.3 vs latest)
+natively -- which now actually matters, given the pipeline built in Phase 33 is cutting real
+versioned releases. User agreed to both.
+
+Verified rather than guessed at every step, having already been burned once on an unverified
+GitHub Action tag in Phase 34: fetched Read the Docs' own MkDocs guide and `python.install`
+config-file reference for the exact `.readthedocs.yaml` shape (confirming `extra_requirements`
+can reference a `pyproject.toml` extra directly, avoiding a second requirements file), and
+`mkdocstrings`' own docs for its Python-handler package name, `paths` option, and `::: module.
+Class` directive syntax.
+
+### Decisions
+
+- **One source of truth, not a fork.** `docs/index.md` and `docs/changelog.md` don't contain
+  prose of their own -- they pull in `README.md`/`CHANGELOG.md` verbatim at build time via
+  `pymdownx.snippets`'s block-include syntax, so the doc site can never drift out of sync with
+  what GitHub/PyPI already show. Only `docs/reference.md` (API reference, generated from the
+  library's own docstrings via `mkdocstrings`) has content that doesn't exist anywhere else.
+- `mkdocs.yml`/`docs/` live at the **repo root**, not inside `python_modules/dagster-cube-dbt/`
+  -- `mkdocstrings`' Python handler needs a `paths: [python_modules/dagster-cube-dbt/src]`
+  entry regardless of where the config lives, and Read the Docs always looks for
+  `.readthedocs.yaml` at the repo root anyway.
+- Doc-build tooling (`mkdocs`, `mkdocs-material`, `mkdocstrings[python]`) added as a
+  `[project.optional-dependencies] docs` **extra**, not a `[dependency-groups]` entry like the
+  existing `dev` group -- deliberately, so Read the Docs' well-documented `extra_requirements`
+  config option can reference it directly via a plain `pip install`, rather than depending on
+  newer, less universally-supported PEP 735 dependency-group tooling in RTD's build image.
+- Added a `docs` job to the shared `ci.yml` (`mkdocs build --strict`) so a broken link/anchor/
+  snippet reference fails PRs the same way a failing test would, not just discovered later on
+  a live RTD build.
+- Found and fixed, empirically rather than by inspection: three of the library's own class
+  docstrings used Sphinx/RST `.. code-block::` directives (leftover from before this session
+  ever considered a Markdown-based doc tool) that `mkdocstrings` doesn't interpret --
+  cross-referencing `component.py`/`resources.py` confirmed this wasn't isolated. Converted to
+  plain indentation, *without* Markdown triple-backtick fences -- a first attempt using fences
+  rendered literal ` ```python ` text inside an already-syntax-highlighted block, since
+  `griffe`'s docstring parser treats an indented block following a `:`-terminated line as a
+  verbatim code block on its own, regardless of Markdown fence syntax inside it. Caught by
+  actually inspecting the rendered HTML output, not assumed correct from the diff.
+- README also had four genuinely broken relative links (`../dagster-cube-dbt-tests/...`,
+  `CHANGELOG.md`, `../../.github/workflows/release.yml`) and one heading-anchor link that
+  didn't match Python-Markdown's actual generated slug (double- vs single-hyphen, for a
+  heading with a `/` between two backtick-wrapped code spans) -- all pre-existing, silently
+  correct-looking on GitHub's own README rendering, invisible until MkDocs' `--strict` mode
+  had a reason to actually check them. Fixed the four links to absolute GitHub URLs (correct
+  from both the raw README and the embedded doc-site copy); fixed the anchor to the slug MkDocs
+  actually generates (verified by inspecting the built HTML's `id` attribute, not re-derived
+  by hand a second time).
+- Found and fixed a real naming bug in the CI setup itself while touching these workflows
+  again: `release.yml`'s job calling the reusable `ci.yml` is named `test`, but `pr.yml`'s was
+  named `ci` -- GitHub Actions prefixes a reusable workflow's check names with the *calling*
+  job's name, so PR runs would have produced checks named `ci / test (py3.12, dbt-core)`,
+  never matching the `test / test (py3.12, dbt-core)` names the user had just configured as
+  required in their branch ruleset (pulled from `release.yml`'s own runs). Renamed `pr.yml`'s
+  job to `test` to match.
+
+### Verification
+
+- `mkdocs build --strict` run locally from the repo root (matching where Read the Docs' own
+  build executes from -- running it from the package subdirectory instead was tried first and
+  failed, since `pymdownx.snippets`' `base_path` resolves against the *working directory*, not
+  `mkdocs.yml`'s location) -- clean, zero warnings, after fixing the docstring/link/anchor
+  issues above.
+- Directly inspected the built HTML: confirmed 5 real `mkdocstrings`-rendered class sections on
+  the reference page (not empty stubs), and confirmed the previously-broken code examples now
+  render as genuine syntax-highlighted blocks with no literal fence-marker text leaking through.
+- Full test suite re-run after the docstring edits (source files, not just docs) --
+  **95/95 passed**.
+- One-time, maintainer-only setup this can't complete unattended -- documented in the README's
+  new "Documentation" section: importing the repo on Read the Docs (auto-detects
+  `.readthedocs.yaml`), and confirming the resulting project slug matches the badge/`site_url`
+  already written assuming `dagster-cube-dbt`.

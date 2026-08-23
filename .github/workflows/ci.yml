@@ -41,3 +41,21 @@ jobs:
         # Env name comes from Hatch's own matrix-naming convention (verified locally via
         # `hatch env show`, e.g. `test.py3.12-core`) -- not guessed.
         run: uvx hatch run test.py${{ matrix.python-version }}-${{ matrix.dbt-engine }}:run
+
+  docs:
+    name: docs
+    runs-on: ubuntu-latest
+    # mkdocs.yml lives at the repo root, not under python_modules/dagster-cube-dbt/ like the
+    # rest of this workflow -- override the workflow-level default back to root for this job.
+    defaults:
+      run:
+        working-directory: .
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: astral-sh/setup-uv@v10.0.1
+        with:
+          enable-cache: true
+
+      - name: Build docs (strict -- fails on any broken link/anchor/snippet)
+        run: uv run --project python_modules/dagster-cube-dbt --extra docs mkdocs build --strict

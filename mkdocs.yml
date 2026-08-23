@@ -1,0 +1,56 @@
+site_name: dagster-cube-dbt
+site_description: A Dagster Component that generates a Cube semantic-layer schema from a dbt project and exposes it as Dagster assets.
+site_url: https://dagster-cube-dbt.readthedocs.io/
+repo_url: https://github.com/cams-data/dagster-cube-dbt
+repo_name: cams-data/dagster-cube-dbt
+edit_uri: edit/main/python_modules/dagster-cube-dbt/README.md
+
+theme:
+  name: material
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+  features:
+    - navigation.sections
+    - navigation.top
+    - content.code.copy
+    - search.suggest
+
+nav:
+  - Home: index.md
+  - API Reference: reference.md
+  - Changelog: changelog.md
+
+# The single source of truth for the prose content is README.md/CHANGELOG.md in the package
+# directory -- index.md/changelog.md pull them in verbatim via pymdownx.snippets rather than
+# duplicating them, so the doc site can never drift out of sync with what PyPI/GitHub show.
+markdown_extensions:
+  - pymdownx.snippets:
+      base_path: ["."]
+      check_paths: true
+  - pymdownx.superfences
+  - pymdownx.highlight
+  - admonition
+  - tables
+  - toc:
+      permalink: true
+
+plugins:
+  - search
+  - mkdocstrings:
+      handlers:
+        python:
+          paths: [python_modules/dagster-cube-dbt/src]
+          options:
+            docstring_style: google
+            show_source: false
+            show_root_heading: true
+            merge_init_into_class: true

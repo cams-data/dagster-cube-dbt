@@ -1,9 +1,10 @@
 # Development plan
 
-**Status**: Stages 0–20 done and verified end to end. Stage 21 (CI/CD/publishing) is
-code-complete but not yet exercised for real — see its "Resume here" checklist for exactly
-what's left. 95 tests passing throughout: `python_modules/dagster-cube-dbt/tests/`,
-run against both dbt-core and dbt Fusion — see Stage 5/8/9/10/11/12/13/14/15/16/17/18/19/20/21 and DECISIONS.md.
+**Status**: Stages 0–20 done and verified end to end. Stage 21 (CI/CD/publishing) is pushed and
+live, though a real PyPI publish still isn't confirmed — see its checklist. Stage 22 (docs
+site) is code-complete and locally strict-build-verified, pending the one-time Read the Docs
+import. 95 tests passing throughout: `python_modules/dagster-cube-dbt/tests/`,
+run against both dbt-core and dbt Fusion — see Stage 5/8/9/10/11/12/13/14/15/16/17/18/19/20/21/22 and DECISIONS.md.
 Stage 1's fixture ended up in two forms — a library-internal one (`tests/fixtures/dbt_project`,
 used directly by the test suite) and a separate `dg`-runnable example project
 (`python_modules/dagster-cube-dbt-tests/`) — both verified end to end, including a real
@@ -614,6 +615,33 @@ first release — both fixed and pushed). Also since expanded to test both Pytho
 2. **Decide when `major_on_zero` flips.** Currently `false` (see the comment in
    `pyproject.toml`) so a breaking-change commit bumps `0.x`'s minor version, not straight to
    `1.0.0`. Revisit once the library is actually meant to declare a stable `1.0`.
+
+## Stage 22 — a docs site: MkDocs + Material + mkdocstrings on Read the Docs
+
+Added after the initial plan, user-prompted -- see DECISIONS.md Phase 35 for the full account
+(tool/host choice reasoning, and the real bugs it caught along the way).
+
+- `mkdocs.yml` + `docs/` at the repo root; `docs/index.md`/`docs/changelog.md` pull in
+  `README.md`/`CHANGELOG.md` verbatim via `pymdownx.snippets` rather than duplicating them;
+  `docs/reference.md` is a real, new page -- an mkdocstrings-generated API reference for the
+  five public symbols, something the README doesn't otherwise provide.
+- `.readthedocs.yaml`: installs the package plus a new `[project.optional-dependencies] docs`
+  extra (`mkdocs`, `mkdocs-material`, `mkdocstrings[python]`).
+- New `docs` job in `ci.yml` (`mkdocs build --strict`) -- broken docs now fail PRs the same way
+  a failing test would.
+- Fixed along the way, not incidental to it: three docstrings still using Sphinx/RST
+  `.. code-block::` directives that `mkdocstrings` can't render; four genuinely broken relative
+  links and one wrong heading-anchor slug in the README, invisible on GitHub's own rendering
+  but caught immediately by `--strict`; and a real CI bug where `pr.yml`'s calling job was
+  named differently from `release.yml`'s, meaning the required-status-check names the user had
+  just configured in their branch ruleset would never have matched a PR run at all.
+- Verified locally: `mkdocs build --strict` is clean; the built HTML actually contains 5
+  real API-reference sections and correctly-rendered (not double-fenced) code examples; full
+  test suite still 95/95 after the docstring edits.
+- One-time setup only a maintainer with a Read the Docs account can do: import the repo at
+  readthedocs.org (auto-detects `.readthedocs.yaml`) and confirm the project slug matches
+  `dagster-cube-dbt` (or update the badge/`site_url` if not) -- documented in the README's new
+  "Documentation" section.
 
 ## Out of scope (future work)
 
