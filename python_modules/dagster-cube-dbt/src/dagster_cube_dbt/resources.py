@@ -24,18 +24,16 @@ class CubeFilePromoter(dg.ConfigurableResource, ABC):
 
     Example -- pushing to S3:
 
-        .. code-block:: python
+        import boto3
+        from dagster_cube_dbt import CubeFilePromoter
 
-            import boto3
-            from dagster_cube_dbt import CubeFilePromoter
+        class S3CubeFilePromoter(CubeFilePromoter):
+            bucket: str
 
-            class S3CubeFilePromoter(CubeFilePromoter):
-                bucket: str
-
-                def promote(self, context, cubes_dir, views_dir):
-                    s3 = boto3.client("s3")
-                    for path in [*cubes_dir.glob("*.yaml"), *views_dir.glob("*.yaml")]:
-                        s3.upload_file(str(path), self.bucket, f"cubes/{path.name}")
+            def promote(self, context, cubes_dir, views_dir):
+                s3 = boto3.client("s3")
+                for path in [*cubes_dir.glob("*.yaml"), *views_dir.glob("*.yaml")]:
+                    s3.upload_file(str(path), self.bucket, f"cubes/{path.name}")
 
     See `CubeDbtProjectComponent`'s docstring for how to bind a concrete instance to the
     component's `promoter_resource_key`.

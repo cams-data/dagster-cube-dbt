@@ -209,30 +209,28 @@ class CubeDbtProjectComponent(DbtProjectComponent):
     anywhere in the project -- it doesn't need to be declared alongside this component; any
     `Definitions` merged into the same project supplies it:
 
-        .. code-block:: python
+        # e.g. defs/resources.py, auto-discovered like any other defs module
+        import dagster as dg
+        from dagster_cube_dbt import LocalFileCubeFilePromoter
 
-            # e.g. defs/resources.py, auto-discovered like any other defs module
-            import dagster as dg
-            from dagster_cube_dbt import LocalFileCubeFilePromoter
+        @dg.definitions
+        def resources():
+            return dg.Definitions(
+                resources={
+                    "cube_file_promoter": LocalFileCubeFilePromoter(
+                        output_dir="cube_project/model/cubes",
+                    )
+                }
+            )
 
-            @dg.definitions
-            def resources():
-                return dg.Definitions(
-                    resources={
-                        "cube_file_promoter": LocalFileCubeFilePromoter(
-                            output_dir="cube_project/model/cubes",
-                        )
-                    }
-                )
+    And the matching `defs.yaml`:
 
-        .. code-block:: yaml
-
-            # defs.yaml
-            type: dagster_cube_dbt.CubeDbtProjectComponent
-            attributes:
-              project: "{{ project_root }}/path/to/dbt_project"
-              cube_select:
-                paths: ["marts"]
+        # defs.yaml
+        type: dagster_cube_dbt.CubeDbtProjectComponent
+        attributes:
+          project: "{{ project_root }}/path/to/dbt_project"
+          cube_select:
+            paths: ["marts"]
 
     `LocalFileCubeFilePromoter` (writes straight to a directory on disk) ships with this
     library for local development, where the Dagster process and the Cube process share a
