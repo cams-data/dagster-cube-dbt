@@ -2254,3 +2254,49 @@ upload validation; removed it before it ever shipped.
   new "Releasing" section rather than silently assumed done: creating the `pypi` GitHub
   Environment, and registering the PyPI pending publisher (project name, owner, repo, workflow
   file, environment name) at `https://pypi.org/manage/account/publishing/`.
+
+## Phase 34 — the pipeline's first real run, and two more bugs it actually caught
+
+The user set up the PyPI pending publisher and the `pypi` GitHub Environment, then pushed.
+Two real failures came back from the first live run -- exactly the kind of thing local
+verification can miss and only a real run surfaces.
+
+1. **`Unable to resolve action astral-sh/setup-uv@v9, unable to find version v9`.**
+   `astral-sh/setup-uv` turned out not to publish floating major-version tags (`v9`, `v10`)
+   the way `actions/checkout` or `python-semantic-release` do -- only full versions like
+   `v10.0.1`. Verified against the repo's actual `/tags` page before picking a replacement
+   (`v10.0.1`) rather than guessing a second time, and spot-checked `actions/checkout@v7`,
+   `python-semantic-release@v10.6.1`, and (later) `actions/setup-python@v7` the same way, since
+   one wrong assumption was reason enough to stop trusting the others.
+2. **The dry-run version computed `1.0.0`, not `0.1.0`.** Caught locally, before ever pushing
+   -- ran `semantic-release version --print --noop` against the real two-commit history first,
+   specifically because a version published to PyPI can never be reused even after deletion,
+   and this seemed worth verifying rather than trusting. Root cause: `allow_zero_version`
+   (whether the *first ever* release is allowed to land below `1.0.0` at all) is a distinct
+   setting from `major_on_zero` (how *later* breaking changes behave once already on `0.x`) --
+   the earlier phase had only set the latter. `allow_zero_version` defaults to `false`. Fixed
+   by setting it explicitly to `true`, re-verified locally (now computes `0.1.0`), and folded
+   in a second, unrelated fix noticed along the way: `changelog.changelog_file` is a deprecated
+   config location, moved to `changelog.default_templates.changelog_file`.
+
+Also, separately, the user asked a plain design question -- "does our test matrix need to
+cover multiple Python versions?" -- noticing on their own that `classifiers` already claimed
+3.12 *and* 3.13 support while the Hatch test matrix only ever ran 3.12, an unverified claim
+sitting in already-shipped metadata. Added `python = ["3.12", "3.13"]` as a second axis in
+`[[tool.hatch.envs.test.matrix]]` (crossed with the existing `dbt-engine` axis, 2x2 = 4 CI
+jobs), and `actions/setup-python` per matrix leg in `ci.yml` to provision each interpreter --
+not relying on Hatch or `uv` to auto-provision a missing one, since that behavior wasn't
+verified and `actions/setup-python` is the well-established mechanism for this. The exact
+Hatch-generated env names needed for the workflow's `hatch run test.<name>:run` step
+(`test.py3.12-core`, `test.py3.13-fusion`, ...) were read directly off `hatch env show`'s real
+output, not inferred from Hatch's naming convention secondhand.
+
+### Verification
+
+- `hatch env show` confirms the real matrix env names before wiring them into `ci.yml`.
+- `hatch run test.py3.12-core:run` (the renamed env) actually executed locally --
+  **95/95 passed** -- confirming the matrix restructuring (moving `python` out of the env's
+  static config and into the matrix) didn't silently break the existing dbt-core leg.
+  Python 3.13 isn't installed on this dev machine, so that leg is verified structurally
+  (`hatch env show` lists it correctly) and will get its first real execution in CI.
+- All workflow YAML re-validated (`yaml.safe_load`) after each edit.

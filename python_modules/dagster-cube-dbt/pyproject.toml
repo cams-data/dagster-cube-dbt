@@ -45,8 +45,9 @@ dev = [
 # against the dbt Fusion engine -- they can't be installed in the same environment (Fusion
 # is published as a pre-release of a distribution literally named `dbt`, colliding with
 # dbt-core's own console script), so each matrix leg gets its own Hatch-managed venv. See
-# DECISIONS.md for what prompted this and what it caught.
-python = "3.12"
+# DECISIONS.md for what prompted this and what it caught. `python` is a matrix axis below,
+# not fixed here -- `requires-python`/classifiers claim 3.12 and 3.13 support, so both are
+# actually exercised in CI rather than just claimed.
 dependencies = [
     "pytest",
     "dagster~=1.13.0",
@@ -56,6 +57,7 @@ dependencies = [
 ]
 
 [[tool.hatch.envs.test.matrix]]
+python = ["3.12", "3.13"]
 dbt-engine = ["core", "fusion"]
 
 [tool.hatch.envs.test.overrides]

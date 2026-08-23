@@ -600,25 +600,18 @@ production bugs that surfaced along the way, and Phase 33 for the CI/CD pipeline
   GitHub Environment named `pypi`, and register a PyPI "pending publisher" pointing at this
   repo/`release.yml`/that environment name.
 
-**Status: code-complete, not yet exercised end-to-end.** Everything above is written, locally
-build-verified (`uv build` + `twine check dist/*` both pass), and unit-tested where that's
-possible (the workflow YAML files themselves parse; nothing about them has actually run on
-GitHub yet). Resume here with, in order:
+**Status: pushed, first real run found (and fixed) two bugs, not yet confirmed to have
+actually published.** Committed and pushed to `origin/main` (see DECISIONS.md Phase 32 for the
+two Python-side bugs the resulting real k8s/git usage caught, and Phase 34 for two more the
+pipeline's own first live run caught: a nonexistent `astral-sh/setup-uv@v9` tag, and
+`allow_zero_version` defaulting to `false` and computing `1.0.0` instead of `0.1.0` for the
+first release — both fixed and pushed). Also since expanded to test both Python 3.12 and 3.13
+(Stage 21 was 3.12-only despite `classifiers` already claiming 3.13 support). Remaining:
 
-1. **Commit and push.** As of this stage, the entire repo is still one `Initial commit` plus
-   everything since sitting uncommitted in the working tree (`git status` on this repo) — the
-   workflows can't run at all, not even the PR check, until this lands on GitHub. This also
-   means: from this point on, commit messages need to actually follow [Conventional
-   Commits](https://www.conventionalcommits.org/) (`feat: ...`, `fix: ...`, etc.), since
-   they're what drives the version/changelog once `release.yml` starts running.
-2. **PyPI Trusted Publisher.** Create the `pypi` GitHub Environment and register the PyPI
-   pending publisher — see the exact steps in the README's "Releasing" section. Nobody but a
-   maintainer with PyPI login access can do this step.
-3. **First real release.** Once 1 and 2 are done, the next push to `main` containing a
-   `feat:`/`fix:` commit triggers the first real release. Watch the `release` workflow run in
-   the GitHub Actions tab; confirm the `pypi` job actually publishes and that
+1. **Confirm the current push actually goes green end to end**, including the `publish` job —
+   nothing has confirmed a real PyPI upload has happened yet. Watch the Actions tab; confirm
    `pip install dagster-cube-dbt` resolves afterward.
-4. **Decide when `major_on_zero` flips.** Currently `false` (see the comment in
+2. **Decide when `major_on_zero` flips.** Currently `false` (see the comment in
    `pyproject.toml`) so a breaking-change commit bumps `0.x`'s minor version, not straight to
    `1.0.0`. Revisit once the library is actually meant to declare a stable `1.0`.
 

@@ -15,21 +15,29 @@ permissions:
 
 jobs:
   test:
-    name: test (dbt-${{ matrix.dbt-engine }})
+    name: test (py${{ matrix.python-version }}, dbt-${{ matrix.dbt-engine }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
         # Mirrors `[[tool.hatch.envs.test.matrix]]` in pyproject.toml -- dbt-core and the dbt
         # Fusion engine can't share one environment (see DECISIONS.md), so each gets its own
-        # Hatch-managed venv, same as running this locally.
+        # Hatch-managed venv, same as running this locally. `python-version` is tested against
+        # both values `requires-python`/classifiers actually claim to support, not just one.
+        python-version: ["3.12", "3.13"]
         dbt-engine: [core, fusion]
     steps:
       - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python-version }}
 
       - uses: astral-sh/setup-uv@v10.0.1
         with:
           enable-cache: true
 
       - name: Run tests
-        run: uvx hatch run test.${{ matrix.dbt-engine }}:run
+        # Env name comes from Hatch's own matrix-naming convention (verified locally via
+        # `hatch env show`, e.g. `test.py3.12-core`) -- not guessed.
+        run: uvx hatch run test.py${{ matrix.python-version }}-${{ matrix.dbt-engine }}:run
