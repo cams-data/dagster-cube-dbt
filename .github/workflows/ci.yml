@@ -1,0 +1,35 @@
+name: CI
+
+# Reusable: called by pr.yml (on every pull request) and by release.yml (before it lets a
+# release/publish happen). Keeping it as a single `workflow_call` target means both paths run
+# the exact same test matrix -- nothing can get published without the same tests a PR must pass.
+on:
+  workflow_call:
+
+defaults:
+  run:
+    working-directory: python_modules/dagster-cube-dbt
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: test (dbt-${{ matrix.dbt-engine }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # Mirrors `[[tool.hatch.envs.test.matrix]]` in pyproject.toml -- dbt-core and the dbt
+        # Fusion engine can't share one environment (see DECISIONS.md), so each gets its own
+        # Hatch-managed venv, same as running this locally.
+        dbt-engine: [core, fusion]
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: astral-sh/setup-uv@v9
+        with:
+          enable-cache: true
+
+      - name: Run tests
+        run: uvx hatch run test.${{ matrix.dbt-engine }}:run

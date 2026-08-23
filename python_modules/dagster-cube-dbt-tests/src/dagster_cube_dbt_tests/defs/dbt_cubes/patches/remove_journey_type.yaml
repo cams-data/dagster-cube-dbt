@@ -1,0 +1,6 @@
+cubes:
+  - name: journey_samples
+    $mergeStrategy: patch
+    dimensions:
+      - name: journey_type
+        $mergeStrategy: remove

@@ -1,0 +1,16 @@
+cube_dbt_fixture:
+  target: dev
+  outputs:
+    dev:
+      type: duckdb
+      path: ":memory:"
+      threads: 1
+    # dbt Fusion's DuckDB adapter does not share a single in-memory catalog across the
+    # separate connections it opens per model the way dbt-core's does -- only the first
+    # model built against `:memory:` succeeds, the rest fail with
+    # "Catalog with name main does not exist!". An on-disk file (inside target/, already
+    # gitignored) works identically under both engines. See DECISIONS.md.
+    fusion:
+      type: duckdb
+      path: "target/fusion_test.duckdb"
+      threads: 1

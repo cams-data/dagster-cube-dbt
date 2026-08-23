@@ -1,0 +1,7 @@
+views:
+  - name: journeys_overview
+    cubes:
+      - join_path: journey_samples
+        includes: "*"
+      - join_path: destination_locations
+        includes: "*"

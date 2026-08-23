@@ -1,0 +1,16 @@
+cubes:
+  - name: journey_samples
+    $mergeStrategy: patch
+    measures:
+      - name: count
+        type: count
+    joins:
+      - name: destination_locations
+        relationship: many_to_one
+        sql: "{CUBE}.destination_location_key = {destination_locations.geographic_location_key}"
+      - name: origin_locations
+        relationship: many_to_one
+        sql: "{CUBE}.origin_location_key = {origin_locations.geographic_location_key}"
+      - name: dates
+        relationship: many_to_one
+        sql: "{CUBE}.date_key = {dates.date_key}"

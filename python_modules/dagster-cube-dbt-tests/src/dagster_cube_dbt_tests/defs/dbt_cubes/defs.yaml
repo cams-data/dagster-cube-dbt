@@ -1,0 +1,6 @@
+type: dagster_cube_dbt.CubeDbtProjectComponent
+
+attributes:
+  project: "{{ project_root }}/dbt_project"
+  cube_select:
+    paths: ["marts"]

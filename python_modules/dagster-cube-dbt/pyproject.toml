@@ -1,0 +1,116 @@
+[project]
+name = "dagster-cube-dbt"
+version = "0.1.0"
+description = "A Dagster Component that generates a Cube semantic-layer schema from a dbt project and exposes it as Dagster assets."
+readme = "README.md"
+authors = [
+    { name = "cams-games", email = "cam.d.clarke@gmail.com" }
+]
+license = "MIT"
+license-files = ["LICENSE"]
+requires-python = ">=3.12"
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Typing :: Typed",
+]
+dependencies = [
+    "dagster~=1.13.0",
+    "dagster-dbt",
+    "pyyaml",
+    "deepmerge",
+]
+
+[project.urls]
+Homepage = "https://github.com/cams-data/dagster-cube-dbt"
+Repository = "https://github.com/cams-data/dagster-cube-dbt"
+Issues = "https://github.com/cams-data/dagster-cube-dbt/issues"
+Changelog = "https://github.com/cams-data/dagster-cube-dbt/blob/main/python_modules/dagster-cube-dbt/CHANGELOG.md"
+
+[project.entry-points."dagster_dg_cli.registry_modules"]
+dagster_cube_dbt = "dagster_cube_dbt"
+
+[dependency-groups]
+dev = [
+    "pytest",
+    "dbt-duckdb",
+]
+
+[tool.hatch.envs.test]
+# Runs the test suite against dbt-core (the default `uv run pytest` path) and, separately,
+# against the dbt Fusion engine -- they can't be installed in the same environment (Fusion
+# is published as a pre-release of a distribution literally named `dbt`, colliding with
+# dbt-core's own console script), so each matrix leg gets its own Hatch-managed venv. See
+# DECISIONS.md for what prompted this and what it caught.
+python = "3.12"
+dependencies = [
+    "pytest",
+    "dagster~=1.13.0",
+    "dagster-dbt",
+    "pyyaml",
+    "deepmerge",
+]
+
+[[tool.hatch.envs.test.matrix]]
+dbt-engine = ["core", "fusion"]
+
+[tool.hatch.envs.test.overrides]
+matrix.dbt-engine.dependencies = [
+    { value = "dbt-duckdb", if = ["core"] },
+    # NOT a bare "dbt" -- that resolves to the unrelated, stable "dbt Cloud CLI" package
+    # (also published under the bare name "dbt"), since installers don't consider
+    # prereleases by default. A version specifier whose *lower bound* is itself a
+    # prerelease implicitly allows prereleases to satisfy it (PEP 440), which both excludes
+    # dbt Cloud CLI (currently 0.x) and keeps picking up newer Fusion prereleases without
+    # needing a manual version bump or an explicit --pre/prerelease-allow flag.
+    { value = "dbt>=2.0.0rc0", if = ["fusion"] },
+]
+matrix.dbt-engine.env-vars = [
+    { key = "DAGSTER_CUBE_DBT_TEST_DBT_TARGET", value = "dev", if = ["core"] },
+    { key = "DAGSTER_CUBE_DBT_TEST_DBT_TARGET", value = "fusion", if = ["fusion"] },
+]
+
+[tool.hatch.envs.test.scripts]
+run = "pytest tests/ {args}"
+
+[build-system]
+requires = ["uv_build>=0.10.9,<0.11.0"]
+build-backend = "uv_build"
+
+[tool.semantic_release]
+# The single source of truth for the version is this field -- python-semantic-release computes
+# the next version from Conventional Commits since the last release and writes it straight
+# back in here (and to the git tag/changelog), rather than deriving it separately at build time.
+version_toml = ["pyproject.toml:project.version"]
+commit_parser = "conventional"
+# The CI workflow builds and publishes separately (see .github/workflows/release.yml) -- this
+# step's job is only to compute the version, changelog, commit, tag, and GitHub Release.
+build_command = ""
+# Default is `true` (a breaking change on a 0.x version jumps straight to 1.0.0). While this
+# library is still 0.x, breaking changes are common enough during normal iteration (e.g. a
+# resource field getting renamed) that treating every one of them as "declare 1.0 now" would be
+# wrong -- 1.0 should be a deliberate milestone, not an accidental side effect of a commit
+# message. Flip this to `true` (or just delete the line, matching the default) whenever that
+# milestone is actually decided.
+major_on_zero = false
+
+[tool.semantic_release.changelog]
+changelog_file = "CHANGELOG.md"
+
+[tool.semantic_release.branches.main]
+match = "main"
+prerelease = false
+
+# Preview/pre-release packages: commits pushed to `next` are published to the real PyPI index
+# as prereleases (e.g. 0.2.0rc1) -- `pip install dagster-cube-dbt` never picks these up by
+# default (PEP 440 excludes prereleases from plain resolution), only `pip install --pre` or an
+# exact version pin does. Merge `next` back into `main` when it's ready to become the real
+# release.
+[tool.semantic_release.branches.next]
+match = "next"
+prerelease = true
+prerelease_token = "rc"

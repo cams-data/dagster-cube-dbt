@@ -1,0 +1,7 @@
+cubes:
+  - name: exchange_rates
+    sql: "SELECT * FROM some_external_source"
+    dimensions:
+      - name: currency
+        sql: currency
+        type: string

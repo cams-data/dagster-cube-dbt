@@ -1,0 +1,10 @@
+version: 2
+
+models:
+  - name: int_raw_journey_events
+    columns:
+      - name: event_id
+        data_type: integer
+      - name: raw_payload
+        # deliberately no data_type -- this model is excluded from cube_select, so it must
+        # never trigger the required-data_type check.

@@ -1,0 +1,14 @@
+name: cube_dbt_fixture
+version: "1.0.0"
+profile: cube_dbt_fixture
+
+model-paths: ["models"]
+target-path: "target"
+clean-targets: ["target", "dbt_packages"]
+
+models:
+  cube_dbt_fixture:
+    marts:
+      +materialized: table
+    intermediate:
+      +materialized: view
