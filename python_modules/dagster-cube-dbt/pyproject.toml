@@ -97,8 +97,14 @@ build_command = ""
 # message. Flip this to `true` (or just delete the line, matching the default) whenever that
 # milestone is actually decided.
 major_on_zero = false
+# A *different* setting from `major_on_zero` above: this one governs whether the very first
+# release is allowed to land below 1.0.0 at all. Default is `false`, which would make the
+# first ever release 1.0.0 regardless of `major_on_zero` -- confirmed by actually dry-running
+# `semantic-release version --print` locally before ever pushing, not assumed. Explicitly
+# `true` so the first release is 0.1.0, matching the version already declared above.
+allow_zero_version = true
 
-[tool.semantic_release.changelog]
+[tool.semantic_release.changelog.default_templates]
 changelog_file = "CHANGELOG.md"
 
 [tool.semantic_release.branches.main]
