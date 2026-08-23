@@ -446,6 +446,46 @@ def test_get_cube_asset_spec_sees_extends_resolved_fields(tmp_path, defs_dir):
     assert node.parent_keys == {component.asset_key_for_cube("journey_samples")}
 
 
+def test_get_cube_asset_spec_override_renaming_the_key_is_reflected_in_extends_deps(tmp_path, defs_dir):
+    """Regression test for a real production bug: a subclass overriding `get_cube_asset_spec`
+    to rename a cube's `key` -- exactly the pattern `dagster_dbt.DbtProjectComponent
+    .get_asset_spec` itself documents (`super().get_asset_spec(...).replace_attributes(key=...)`)
+    -- must have that renamed key reflected wherever another cube depends on it via `extends`,
+    not just on the cube's own spec. `deps` used to be computed via `asset_key_for_cube`
+    directly, bypassing `get_cube_asset_spec` (and therefore any override of it) entirely --
+    mirrors `dagster_dbt`'s own `DagsterDbtTranslator.get_asset_spec`, which resolves a node's
+    dependencies by recursively calling `self.get_asset_spec` (dynamically dispatched, so an
+    override applies to how a node is referenced too, not just to its own identity).
+    """
+    (defs_dir / "extends_patch.yaml").write_text(
+        "cubes:\n"
+        "  - name: journey_samples_extended\n"
+        "    extends: journey_samples\n"
+    )
+
+    class RenamingComponent(CubeDbtProjectComponent):
+        def get_cube_asset_spec(self, cube):
+            base_spec = super().get_cube_asset_spec(cube)
+            return base_spec.replace_attributes(key=dg.AssetKey(["renamed", *base_spec.key.path]))
+
+    project = DbtProject(project_dir=FIXTURE_DBT_PROJECT, target=DBT_TARGET)
+    component = RenamingComponent(project=project, cube_select=CubeSelect(paths=["marts"]))
+    component._defs_dir = defs_dir
+    state_path = tmp_path / "state"
+    component.write_state_to_path(state_path)
+
+    context = dg.ComponentTree.for_test().load_context
+    defs = _with_promoter(component.build_defs_from_state(context, state_path), NoopCubeFilePromoter())
+    asset_graph = defs.resolve_asset_graph()
+
+    parent_renamed_key = dg.AssetKey(["renamed", *component.asset_key_for_cube("journey_samples").path])
+    child_renamed_key = dg.AssetKey(
+        ["renamed", *component.asset_key_for_cube("journey_samples_extended").path]
+    )
+    assert child_renamed_key in asset_graph.get_all_asset_keys()
+    assert asset_graph.get(child_renamed_key).parent_keys == {parent_renamed_key}
+
+
 def test_get_cube_asset_spec_resolves_dbt_model_dependency_after_a_rename(tmp_path, defs_dir):
     """A cube renamed via `meta.cube.name`/`suffix` (unit-tested directly against
     `generate_cubes` in test_generation.py) no longer shares its dbt model's name --
