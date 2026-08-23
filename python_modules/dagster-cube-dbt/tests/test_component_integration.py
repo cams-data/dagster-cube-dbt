@@ -6,11 +6,14 @@ logic rather than the YAML-loading plumbing.
 """
 
 import json
+import shutil
 from pathlib import Path
 
 import dagster as dg
 import pytest
+from dagster_dbt.components.dbt_project.component import DbtProjectArgs
 from dagster_dbt.dbt_project import DbtProject
+from dagster_dbt.dbt_project_manager import DbtProjectArgsManager
 
 from dagster_cube_dbt.components.cube_dbt_project.component import (
     CUBE_STATE_FILENAME,
@@ -219,6 +222,57 @@ def test_build_defs_from_state_wires_asset_specs_correctly(tmp_path, defs_dir):
     # cube and view assets both carry the "cube" kind tag for the UI
     assert asset_graph.get(journey_samples_key).kinds == {"cube"}
     assert asset_graph.get(view_key).kinds == {"cube"}
+
+
+def test_build_defs_from_state_does_not_need_the_live_dbt_project_directory(tmp_path, defs_dir):
+    """Regression test for a real production bug: a state-backed component is supposed to run
+    from `write_state_to_path`'s cached copy alone, without the original dbt project directory
+    existing at all -- that's the entire point (a deploy-time container may never have it).
+    Every other test in this file constructs the component with a pre-built `DbtProject`
+    instance, which routes through `NoopDbtProjectManager` and makes `get_project(state_path)`
+    and `get_project(None)` return the exact same object -- silently unable to catch this,
+    since state-aware and live lookups happen to coincide. This test uses a real
+    `DbtProjectArgsManager` instead (the one an actual `project: "path/to/project"` YAML
+    config resolves to), refreshes state from a throwaway copy of the fixture project, deletes
+    that copy entirely, and confirms a cube's dependency on its source dbt model still
+    resolves correctly -- proving `_dbt_model_asset_key_or_none` doesn't fall back to
+    dagster_dbt's own live `asset_key_for_model` (which would need that now-deleted directory).
+
+    Two separate `CubeDbtProjectComponent` instances, deliberately, mirroring the real deploy
+    topology and not just for the state/live distinction above: `write_state_to_path` (called
+    once, then thrown away) itself legitimately reads `self.dbt_project` to build cube data
+    (correct -- it only ever runs where the live project exists), but that's a `@cached_property`
+    -- on the *same* instance, it would stay warm afterwards and mask exactly the bug this test
+    exists to catch. A real deployed process never calls `write_state_to_path` at all; it loads
+    a fresh component and calls only `build_defs_from_state` -- reusing one instance for both
+    calls here would silently stop testing that. (Confirmed by first writing this test with one
+    shared instance and watching it pass unchanged against the reverted, pre-fix code too.)
+    """
+    live_project_dir = tmp_path / "live_dbt_project"
+    shutil.copytree(FIXTURE_DBT_PROJECT, live_project_dir)
+
+    def _build_component() -> CubeDbtProjectComponent:
+        manager = DbtProjectArgsManager(DbtProjectArgs(project_dir=str(live_project_dir), target=DBT_TARGET))
+        component = CubeDbtProjectComponent(project=manager, cube_select=CubeSelect(paths=["marts"]))
+        component._defs_dir = defs_dir
+        return component
+
+    # A wholly separate component/manager, pointed at the permanent fixture directly, purely
+    # to compute the expected key without touching either instance above.
+    expected_dep_key = _make_component(defs_dir).asset_key_for_model("journey_samples")
+
+    state_path = tmp_path / "state"
+    _build_component().write_state_to_path(state_path)  # thrown away once state is cached
+
+    shutil.rmtree(live_project_dir)  # simulate a deploy-time container: never present at all
+
+    context = dg.ComponentTree.for_test().load_context
+    component = _build_component()  # fresh -- has never touched the (now-deleted) live project
+    defs = _with_promoter(component.build_defs_from_state(context, state_path), NoopCubeFilePromoter())
+    asset_graph = defs.resolve_asset_graph()
+
+    journey_samples_key = component.asset_key_for_cube("journey_samples")
+    assert asset_graph.get(journey_samples_key).parent_keys == {expected_dep_key}
 
 
 def test_cube_asset_spec_has_column_schema_metadata_from_dimensions_and_measures(tmp_path, defs_dir):

@@ -2380,3 +2380,79 @@ Class` directive syntax.
   new "Documentation" section: importing the repo on Read the Docs (auto-detects
   `.readthedocs.yaml`), and confirming the resulting project slug matches the badge/`site_url`
   already written assuming `dagster-cube-dbt`.
+
+## Phase 36 — a real design bug in `build_defs_from_state`: it silently needed the live dbt project
+
+The user hit `dagster_dbt.errors.DagsterDbtProjectNotFoundError` deploying `CustomDbtProjectComponent`
+(their own subclass of `CubeDbtProjectComponent`) to k8s, after replacing their original
+`dagster_dbt.DbtProjectComponent` usage with it. The path in the error --
+`.../.venv/lib/python3.12/site-packages/spatialytics_dbt` -- didn't exist.
+
+**Misdiagnosis, corrected by the user directly.** Initial investigation traced the *mechanics*
+of that specific path correctly (their own `[tool.hatch.build.targets.wheel] force-include`
+hack for `pyproject.toml`, combined with a non-editable install, made `dg`'s
+`discover_config_file` resolve `{{ context.project_root }}` to `site-packages` instead of the
+real project root) and then a genuine Dockerfile gap (`spatialytics_dbt/` was never `COPY`'d in
+at all) -- both real, both in `dagster-nz-gov-elt`, both correctly found. But the recommended
+*fix* was wrong in kind: it pointed at the user's deployment config, when the actual defect
+was in this library. The user pushed back directly: **"If your implementation of
+dagster-cube-dbt has to rely on the project existing at run/deployment time, you have done
+something wrong"** -- correctly citing `dagster_dbt`'s own documented state-backed design:
+the manifest is meant to be built once (via `dg utils refresh-defs-state`) and shipped inside
+`.local_defs_state/`; the live dbt project is never expected to exist at deploy time at all.
+
+**Root cause, once actually verified against `dagster_dbt`'s source (not assumed):**
+`DbtProjectComponent.build_defs_from_state` (the correct, state-aware path) calls
+`self._project_manager.get_project(state_path)` -- but `DbtProjectComponent.dbt_project` (a
+`@cached_property` used by `self.asset_key_for_model` and multiple other methods) always calls
+`self._project_manager.get_project(None)` instead, which for a real (non-`DbtProject`-literal)
+project config resolves straight to the *original* configured directory, completely bypassing
+whatever `write_state_to_path` cached. `CubeDbtProjectComponent.build_defs_from_state` used
+`self.dbt_project`/`self.asset_key_for_model` in **three separate places** -- resolving a
+cube's dbt-model dependency (`_dbt_model_asset_key_or_none`), and naming the generated
+multi-asset op/pool and the automation-condition sensor -- all of which would need the live
+project directory to exist at deploy time, defeating the entire point of being state-backed.
+Existing tests never caught this because every one of them constructs the component with a
+pre-built `DbtProject` *instance* (routing through `NoopDbtProjectManager`, whose
+`get_project(state_path)` and `get_project(None)` are always identical), never exercising the
+real `DbtProjectArgsManager` used by an actual `project: "path"` YAML config.
+
+### Decisions
+
+- `build_defs_from_state` now computes a state-aware `project`/`manifest` itself
+  (`self._project_manager.get_project(state_path)`, mirroring exactly what
+  `super().build_defs_from_state` already does internally), stored as transient instance
+  attributes (`_state_aware_project`/`_state_aware_manifest`, same lifecycle-scoped-to-one-
+  build-call pattern this file already used for `_defs_dir`) rather than threaded as new
+  parameters through `get_cube_asset_spec` -- that method is `@public` and documented as
+  overridable with its current single-argument signature, so changing it would be an
+  unnecessary breaking change for downstream subclasses like the user's.
+- `_dbt_model_asset_key_or_none` now replicates `asset_key_for_model`'s exact lookup logic
+  (same `ASSET_RESOURCE_TYPES` filter, same translator call) against this state-aware data,
+  instead of calling the live method at all.
+- The op/pool/sensor `name`s (previously `self.dbt_project.name`) now read
+  `state_aware_project.name` instead -- the same class of bug, just for a project *name*
+  rather than its manifest, caught only once the regression test below actually ran against
+  the fix and still failed on this second, independent occurrence.
+
+### Verification
+
+- New `test_build_defs_from_state_does_not_need_the_live_dbt_project_directory` in
+  `test_component_integration.py`, using a real `DbtProjectArgsManager` (not the
+  `NoopDbtProjectManager` every other test in the file uses) against a *throwaway copy* of the
+  fixture project -- refreshes state, deletes that copy entirely, then builds defs from state
+  alone and asserts the cube's dependency on its source dbt model still resolves correctly.
+- Iterated on the test itself twice before trusting it, each time by deliberately reverting
+  the fix and confirming the test actually failed against the broken code -- not just that it
+  passed against the fixed code, which two earlier versions of this same test did *without*
+  actually exercising the bug: the first computed its expected-key assertion by calling the
+  live `asset_key_for_model` on the same component instance before deleting the directory,
+  silently warming that method's own cache; the second still shared one component instance
+  between `write_state_to_path` and `build_defs_from_state`, letting `write_state_to_path`'s
+  own legitimate `self.dbt_project` access (building cube data, where the live project
+  correctly does exist) warm the same cache for the rest of that instance's life -- neither
+  mirrored a real deployed process, which never calls `write_state_to_path` at all. The final
+  version uses two separate component instances, confirmed to fail against the reverted code
+  with the exact same `DagsterDbtProjectNotFoundError` the user hit in production, then pass
+  against the fix.
+- Full suite: **96/96 passed** (95 existing + the new regression test).
