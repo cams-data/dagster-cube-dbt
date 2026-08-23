@@ -8,5 +8,10 @@ permissions:
   contents: read
 
 jobs:
-  ci:
+  # Named `test`, matching release.yml's calling job -- GitHub Actions prefixes reusable-
+  # workflow check names with the *calling* job's name, so this keeps PR-triggered and push-
+  # triggered runs producing identically-named checks (`test / test (py3.12, dbt-core)`, ...),
+  # which is what a branch protection rule's required-status-checks list actually matches
+  # against. A mismatched name here would mean PRs never satisfy the required checks at all.
+  test:
     uses: ./.github/workflows/ci.yml
