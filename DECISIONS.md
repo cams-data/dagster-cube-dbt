@@ -2456,3 +2456,68 @@ real `DbtProjectArgsManager` used by an actual `project: "path"` YAML config.
   with the exact same `DagsterDbtProjectNotFoundError` the user hit in production, then pass
   against the fix.
 - Full suite: **96/96 passed** (95 existing + the new regression test).
+
+## Phase 37 — Phase 36's own fix broke `extends`-cube dependencies for a subclass renaming keys
+
+Immediately after Phase 36, the user reported: "Seems your fix may have broken dependency
+between cubes that extend a parent?" My first response defended the fix -- `git diff` showed
+the `extends` branch of `get_cube_asset_spec` was byte-for-byte untouched -- and asked for a
+concrete failing case rather than assuming either way. The user then diagnosed it directly:
+**"The deps rely on the asset key not being updated during the `get_cube_asset_spec` function,
+which I overrode. The original dagster-dbt package supports changing the asset key by
+overriding `get_asset_spec` without breaking the deps chain. You should see how dagster-dbt
+manages this."** Right again -- this was a real, pre-existing bug (not introduced by Phase 36,
+just newly surfaced by the user actually deploying their renaming override against it), and
+the fix required understanding a `dagster_dbt` mechanism this library had never replicated.
+
+**Verified directly against `dagster_dbt`'s own source, not assumed:**
+`DagsterDbtTranslator.get_asset_spec` computes a node's `deps` by *recursively* calling
+`self.get_asset_spec(manifest, upstream_id, project)` for each upstream unique_id -- not a
+separate, narrower key-only function. Combined with `create_component_translator_cls`'s shim
+(`DbtProjectComponent.translator` wraps `self`, the component, in a translator whose
+`get_asset_spec`/`get_asset_check_spec` delegate to the component's own method *if the
+component's class has overridden it*), that recursive `self.get_asset_spec(...)` call resolves,
+at runtime, to whatever the most-derived override is -- for both a node's own identity and how
+every dependent references it. This is exactly why `dagster_dbt` supports the documented
+pattern of overriding `get_asset_spec` wholesale (`super().get_asset_spec(...)
+.replace_attributes(key=...)`) without breaking dependency edges: the override is never
+bypassed, no matter which node the framework is currently resolving.
+
+`CubeDbtProjectComponent.get_cube_asset_spec`'s `extends` branch never had this property: an
+`extends`-parent's dependency key was computed via `self.asset_key_for_cube(parent_cube_name)`
+-- a separate, narrow method that recomputes the *default* key from scratch, completely
+bypassing whatever a subclass's `get_cube_asset_spec` override (renaming the key via
+`replace_attributes`, `CustomDbtProjectComponent`'s exact pattern) would have produced for that
+same cube. (The dbt-model-dependency path, `_dbt_model_asset_key_or_none`, was already fine --
+it goes through `self.translator.get_asset_spec(...)`, which is the same
+`create_component_translator_cls` shim `dagster_dbt` itself uses, so a subclass's *dbt-model*
+key-renaming override was already respected there. Only the cube-to-cube edge was missing the
+equivalent mechanism.)
+
+### Decisions
+
+- Added `_cube_asset_spec_by_name`: a memoized, `self.get_cube_asset_spec`-dispatched lookup
+  (not `asset_key_for_cube` directly) -- mirroring `DagsterDbtTranslator.get_asset_spec`'s own
+  `_resolved_specs` memoization exactly. `get_cube_asset_spec`'s `extends` branch now calls
+  this instead of `asset_key_for_cube`, so a subclass override applies consistently whether a
+  cube is being built for its own sake or looked up as another cube's `extends` target.
+- All cube specs (not just `extends` targets) now get built through this same memoized path --
+  `build_defs_from_state` first builds a `{name: augmented_cube_dict}` map, then resolves every
+  top-level spec through `_cube_asset_spec_by_name` too, so a cube referenced both directly and
+  as a dependency is only ever built once.
+- No new cycle-guard needed: `resolve_extends` (called earlier in the same method) already
+  raises `CircularExtendsError` for any `extends` cycle, and only runs successfully before
+  `_cube_asset_spec_by_name`'s own recursion ever begins -- by the time it can run at all,
+  every `extends` chain it might walk is already guaranteed acyclic.
+- `get_cube_asset_spec`'s docstring updated to explicitly document this guarantee for future
+  subclass authors, citing the exact `dagster_dbt` pattern it now mirrors.
+
+### Verification
+
+- New `test_get_cube_asset_spec_override_renaming_the_key_is_reflected_in_extends_deps`: a
+  `RenamingComponent` subclass overriding `get_cube_asset_spec` with the user's exact pattern
+  (`super().get_cube_asset_spec(cube).replace_attributes(key=...)`), asserting an `extends`
+  child's `parent_keys` reflects the *renamed* parent key, not the un-renamed default.
+- Confirmed the same way as Phase 36's test: reverted just the fix, watched this new test fail
+  with the wrong (un-renamed) dependency key, restored the fix, watched it pass.
+- Full suite: **97/97 passed** (96 + this new regression test).

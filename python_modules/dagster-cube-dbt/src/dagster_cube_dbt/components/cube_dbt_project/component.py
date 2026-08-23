@@ -369,7 +369,7 @@ class CubeDbtProjectComponent(DbtProjectComponent):
         # freshness back to the dbt model transitively -- one edge per `extends` link mirrors
         # the actual reuse relationship, rather than every cube in a chain independently
         # rediscovering the same dbt model.
-        specs = []
+        augmented_cubes_by_name: dict[str, dict[str, Any]] = {}
         for cube in cubes:
             name = cube["name"]
             resolved_cube = dict(resolved_cubes[name])
@@ -378,7 +378,19 @@ class CubeDbtProjectComponent(DbtProjectComponent):
                 resolved_cube[_EXTENDS_PARENT_KEY] = parent_name
             elif name in cube_source_models:
                 resolved_cube[_DBT_MODEL_NAME_KEY] = cube_source_models[name]
-            specs.append(self.get_cube_asset_spec(resolved_cube))
+            augmented_cubes_by_name[name] = resolved_cube
+
+        # `get_cube_asset_spec` is `@public`/overridable, and a subclass that renames a cube's
+        # `key` -- e.g. via `replace_attributes` on the result, exactly the pattern
+        # `dagster_dbt.DbtProjectComponent.get_asset_spec` itself documents -- needs an
+        # `extends` dependency to see that *same* renamed key, not the un-renamed one
+        # `asset_key_for_cube` alone would compute. Mirrors `DagsterDbtTranslator.get_asset_spec`
+        # exactly: resolving a cube's spec (and therefore its dependents' `deps`) always goes
+        # through this one memoized, `self.`-dispatched path, so an override applies
+        # consistently everywhere the cube is referenced, not just to its own top-level spec.
+        self._cube_dicts_by_name = augmented_cubes_by_name
+        self._cube_spec_cache: dict[str, dg.AssetSpec] = {}
+        specs = [self._cube_asset_spec_by_name(name) for name in augmented_cubes_by_name]
         specs += [self.get_view_asset_spec(view) for view in views]
 
         @dg.multi_asset(
@@ -428,6 +440,19 @@ class CubeDbtProjectComponent(DbtProjectComponent):
     def asset_key_for_view(self, name: str) -> dg.AssetKey:
         return dg.AssetKey([VIEW_KEY_PREFIX, name])
 
+    def _cube_asset_spec_by_name(self, name: str) -> dg.AssetSpec:
+        """Resolves (and memoizes) a cube's `AssetSpec` by name, always through
+        `self.get_cube_asset_spec` -- never `asset_key_for_cube` alone -- so a subclass
+        override of `get_cube_asset_spec` (e.g. renaming `key`) is reflected consistently
+        whether this cube is being built for its own sake or looked up as another cube's
+        `extends` dependency. Safe from infinite recursion: `resolve_extends` (called before
+        this is ever populated) already raises `CircularExtendsError` for any `extends` cycle,
+        so by the time this runs, every `_EXTENDS_PARENT_KEY` chain is guaranteed acyclic.
+        """
+        if name not in self._cube_spec_cache:
+            self._cube_spec_cache[name] = self.get_cube_asset_spec(self._cube_dicts_by_name[name])
+        return self._cube_spec_cache[name]
+
     def _dbt_model_asset_key_or_none(self, name: str) -> dg.AssetKey | None:
         # Deliberately not `self.asset_key_for_model(name)` -- see the comment in
         # `build_defs_from_state` on why that would need the live dbt project directory to
@@ -449,6 +474,14 @@ class CubeDbtProjectComponent(DbtProjectComponent):
     def get_cube_asset_spec(self, cube: Mapping[str, Any]) -> dg.AssetSpec:
         """Builds the `AssetSpec` for one generated (and merge-patched) cube. Override this in
         a subclass to customize cube assets, e.g. to set `group_name` or `owners`.
+
+        If you override this to change a cube's `key` (e.g. via `.replace_attributes(key=...)`
+        on the returned spec, the same pattern `dagster_dbt.DbtProjectComponent.get_asset_spec`
+        itself documents), that renamed key is automatically what a *dependent* cube's `deps`
+        points at too when it `extends` this one -- every cube's spec is resolved through this
+        same overridable method (recursively, memoized), never through `asset_key_for_cube`
+        directly, exactly mirroring how `dagster_dbt`'s own `DagsterDbtTranslator.get_asset_spec`
+        keeps a dbt model's renamed key consistent with how its dependents reference it.
 
         `cube` is extends-resolved: if it (or an ancestor, for a multi-level `extends` chain)
         has `extends: some_parent`, its fields already reflect `some_parent`'s fields folded
@@ -473,7 +506,9 @@ class CubeDbtProjectComponent(DbtProjectComponent):
         parent_cube_name = cube.pop(_EXTENDS_PARENT_KEY, None)
         source_model_name = cube.pop(_DBT_MODEL_NAME_KEY, name)
         if parent_cube_name is not None:
-            dep_key = self.asset_key_for_cube(parent_cube_name)
+            # Not `self.asset_key_for_cube(parent_cube_name)` -- see `_cube_asset_spec_by_name`'s
+            # docstring for why that would miss a subclass's own key-renaming override.
+            dep_key = self._cube_asset_spec_by_name(parent_cube_name).key
         else:
             dep_key = self._dbt_model_asset_key_or_none(source_model_name)
         return dg.AssetSpec(
