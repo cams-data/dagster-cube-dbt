@@ -1,6 +1,6 @@
 [project]
 name = "dagster-cube-dbt"
-version = "0.1.4"
+version = "0.2.0-rc.3"
 description = "A Dagster Component that generates a Cube semantic-layer schema from a dbt project and exposes it as Dagster assets."
 readme = "README.md"
 authors = [
@@ -23,6 +23,7 @@ dependencies = [
     "dagster-dbt",
     "pyyaml",
     "deepmerge",
+    "requests",
 ]
 
 [project.optional-dependencies]
@@ -64,6 +65,7 @@ dependencies = [
     "dagster-dbt",
     "pyyaml",
     "deepmerge",
+    "requests",
 ]
 
 [[tool.hatch.envs.test.matrix]]

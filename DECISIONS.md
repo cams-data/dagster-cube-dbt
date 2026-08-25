@@ -2571,3 +2571,159 @@ against a table that doesn't exist yet.
   fail (`1 == 0` at the tick where the definition changes, before the model has materialized --
   the exact bug the user reported), restored the fix, watched it pass.
 - Full suite: **98/98 passed** (97 + this new regression test).
+
+## Phase 39 -- `landing_check`: an optional post-promotion poll against Cube's own REST API
+
+Scoped ahead of the planned Superset sync work (see `SUPERSET_SYNC_PLAN.md`) after the user
+flagged a real gap: `promoter.promote()` returning success only means the generated cube/view
+YAML was *handed off* -- whether a running Cube instance has actually picked it up (hot-reload,
+Cube Cloud propagation, ...) is invisible to Dagster. A cube/view asset can show as
+materialized in Dagster while still not being queryable in Cube yet. The user's own proposed
+mechanism -- stamp each cube/view's `code_version` into its own metadata before promotion, then
+poll Cube's API until it echoes that value back -- is exactly what got built, after verifying
+two things against Cube's actual docs rather than assuming them:
+
+- `GET /v1/meta` echoes a cube/view's custom `meta:` block verbatim (confirmed against Cube's
+  REST API reference; also cross-checked a since-closed GitHub issue, `cube-js/cube#7740`,
+  reporting this was *missing* in an older Cube version -- current docs show it present, but
+  this means the feature has an implicit minimum-Cube-version assumption worth documenting, not
+  something to treat as universally true).
+- Cube's REST API auth is a bare token in the `Authorization` header, **not** a `Bearer <token>`
+  scheme (confirmed via Cube's own auth docs and a GitHub issue discussing exactly this
+  difference from convention) -- typically a JWT signed with `CUBEJS_API_SECRET`. The resource
+  accepts a pre-built token string rather than signing one itself, deliberately: security-context
+  claims requirements vary per deployment, and guessing a claims shape would repeat the same
+  mistake this project has already been burned by twice (Phases 36-37) -- depending on assumed
+  behavior instead of a documented, stable contract.
+
+### Decisions
+
+- `meta.dagster_cube_dbt.code_version` is the injection point -- namespaced to avoid colliding
+  with whatever a user already put in a cube's `meta` via `meta.cube.meta` (an existing,
+  pre-Phase-39 pass-through), merged in rather than overwritten (`with_landing_check_meta`).
+- The stamped value is `AssetSpec.code_version` itself (already computed once, via
+  `_code_version`, for each cube/view's `AssetSpec`) -- not a fresh hash of the raw
+  promoted-YAML dict. Those two would actually differ: the `AssetSpec`'s hash is computed over
+  the `extends`-*resolved* dict (so an ancestor's field change still bumps a child's
+  `code_version`, per Phase 18/Phase 37's design), while the promoted YAML keeps `extends:`
+  literal for Cube to resolve itself. Using the same value Dagster already shows for that
+  asset's `code_version` means what Cube's meta panel displays and what Dagster's UI displays
+  are always the same number -- one canonical source of truth, not two hashes of different
+  content that happen to usually agree.
+- Off by default (`landing_check: CubeLandingCheck | None = None`) -- it needs Cube API
+  credentials and adds latency to every promotion, and plenty of deployments don't need it.
+  When unset, promoted YAML is byte-identical to pre-Phase-39 output (verified by a dedicated
+  regression test) -- no injected `meta.dagster_cube_dbt` key at all, not even an empty one.
+- Polling is scoped to the assets *actually selected* for the run, not every generated
+  cube/view (`promoter.promote` itself still ships the full generated set, unchanged) -- matches
+  what the op yields `MaterializeResult`s for.
+- On timeout: fails the run outright (`dg.Failure`, raised before any `MaterializeResult` is
+  yielded -- the same contract `CubeFilePromoter.promote` already documents for its own
+  failures), naming exactly which cube(s)/view(s) never landed. Rejected logging a warning and
+  materializing anyway -- that would silently reintroduce the exact problem this feature exists
+  to close. Since a failed run leaves the asset's `code_version` unchanged, the next automation
+  evaluation just retries the whole promote-then-poll cycle -- no special retry bookkeeping
+  needed, `code_version_changed()`'s own persistence (Phase 38) already covers it.
+- `requests` is now a base (not optional-extra) dependency -- unlike the still-hypothetical
+  Superset integration, every user of this library already necessarily talks to a Cube
+  deployment, so gating basic HTTP access to *that same* deployment behind an extra buys
+  little. Confirmed via `uv.lock` that this added zero new packages -- `requests` was already
+  present transitively (through `dagster`/`dagster-dbt`), just not previously a direct
+  dependency.
+- `CubeApiClient` is an abstract base (like `CubeFilePromoter`) with `CubeRestApiClient` as the
+  one concrete implementation, rather than a single concrete class -- keeps a seam for a test
+  double (`fetch_meta` is trivial to fake) and for a future non-REST way of checking Cube's
+  state, without committing to needing one yet.
+
+### Verification
+
+- New `tests/test_landing_check.py` (6 tests): `with_landing_check_meta`'s merge-not-overwrite
+  behavior (including on an entity with no prior `meta`), `CubeRestApiClient.fetch_meta`'s
+  request shape (bare token header, trailing-slash-stripped URL) against a mocked
+  `requests.get`, and `wait_for_landing`'s polling loop (returns once all entities match;
+  raises `dg.Failure` naming only the still-pending ones on timeout).
+- New tests in `test_component_integration.py`: `test_landing_check_disabled_by_default_...`
+  (promoted YAML has no injected key when the feature is off), `test_landing_check_stamps_...`
+  (promoted YAML carries the exact `AssetSpec.code_version`; a fake `CubeApiClient` returning a
+  stale value on its first call and the matching one on its second proves this isn't a
+  single-poll implementation), `test_landing_check_timeout_fails_the_run_...` (no
+  `MaterializeResult` on timeout).
+- Confirmed both integration tests actually catch real bugs, the same way as every prior phase:
+  temporarily disabled the meta-injection branch alone (`test_landing_check_stamps_...` failed,
+  `test_landing_check_disabled_by_default_...` still correctly passed -- proving it isn't just
+  testing "the feature is off"), restored it, then temporarily disabled the polling branch alone
+  (`test_landing_check_timeout_...` failed as expected), restored it.
+- Full suite: **107/107 passed** (98 + 3 integration + 6 unit).
+
+## Phase 40 -- `landing_check` broke under a subclass renaming the last key path segment (real production bug, first real usage of the feature)
+
+Found immediately on the first real deployment of Phase 39's `landing_check`, via the same
+production project (`nz-data-exploration/dagster-nz-gov-elt`) that surfaced Phases 36 and 37:
+`KeyError: 'geographic_areas'` inside `_cube_assets`, at
+`code_version_by_name[cube["name"]]`. The user's `CustomDbtProjectComponent.get_cube_asset_spec`
+override computes a wholly new key from a `group`/`name` pair --
+`dg.AssetKey(["cube", group, f"{name}_cube"])` -- rather than prepending to the default key the
+way every prior test's renaming override did (Phase 37's `RenamingComponent`:
+`AssetKey(["renamed", *base_spec.key.path])`).
+
+Phase 39's `code_version_by_name` was built as `{spec.key.path[-1]: spec.code_version for spec
+in specs}`, on the documented assumption that "a cube/view's own name is always its asset key's
+last path segment... regardless of any subclass renaming the rest of the key." That assumption
+is simply false for this (entirely reasonable) override shape: the last segment is
+`f"{name}_cube"`, not `name`, so the lookup at `code_version_by_name[cube["name"]]` (using the
+cube dict's real, un-renamed `name` field) never finds a matching key. The equivalent `expected
+= {spec.key.path[-1]: spec.code_version for spec in specs if ...}` used for polling had the
+identical bug one level down -- it would have built an `expected` dict keyed by
+`"geographic_areas_cube"`, which would never match Cube's own `/v1/meta` response (Cube only
+ever knows the entity by its real `name`, `"geographic_areas"`), so even past the `KeyError` the
+polling step would have silently timed out on every run for a project using this override shape.
+
+This is the exact class of mistake [[feedback_override_safe_deps]] already documents from
+Phase 37 -- reintroduced in brand new code within the same session that memory was written,
+because the new code derived an entity's identity by *parsing a subclass-computed value*
+(`spec.key`) instead of carrying the real identity (the cube/view dict's own `name` field)
+through directly. Phase 37's fix pattern (resolve dependency keys by recursively calling the
+same overridable method) doesn't directly apply here -- this isn't a dependency-key lookup, it's
+matching a Dagster `AssetSpec` back to the raw generated dict it came from -- but the underlying
+principle is the same: never assume a shape or invariant about a value a subclass override is
+free to change.
+
+### Decisions
+
+- `code_version_by_name` and its inverse, `name_by_key` (`AssetKey -> name`, needed to recover
+  a selected entity's real name from `context.selected_asset_keys`, which only has keys), are
+  now built by **positional pairing** with `cube_names`/`views` -- `cube_specs = [self.
+  _cube_asset_spec_by_name(name) for name in cube_names]` and `view_specs = [self.
+  get_view_asset_spec(view) for view in views]` are each built in the same order as their
+  corresponding name list, then zipped together. Neither dict is ever built by inspecting
+  `spec.key` to guess an entity's name -- the real `name` always comes from the cube/view dict
+  itself, which no key-renaming override can touch without also changing `cubes`/`views`.
+
+### Verification
+
+- New `test_landing_check_works_when_a_subclass_renames_the_keys_last_path_segment`: a
+  `RenamingComponent` whose `get_cube_asset_spec` override matches the user's real pattern
+  (`key=AssetKey(f"{cube['name']}_cube")`), with `landing_check` configured, materializing the
+  renamed cube asset and asserting the promoted YAML's stamped `code_version` matches the
+  `AssetSpec`'s.
+- Confirmed the same way as every prior phase: reverted just the fix (kept the new test),
+  watched it reproduce the exact reported `KeyError`, restored the fix, watched it pass.
+- Full suite: **108/108 passed** (107 + this new regression test).
+
+## Phase 41 -- `CubeRestApiClient.verify_tls`: an escape hatch for self-signed/internal-CA certs
+
+Small, user-requested addition: a `verify_tls: bool = True` field on `CubeRestApiClient`, passed
+straight through as `requests.get(..., verify=self.verify_tls)`. Needed for deployments the
+resource can't otherwise reach with a certificate that validates against the system trust
+store (a self-hosted Cube instance behind a self-signed or internal-CA cert being the obvious
+case). Defaults to `True` (verify, matching `requests`' own default) -- opting out is explicit,
+not something a project falls into by omission.
+
+### Verification
+
+- New unit tests in `test_landing_check.py`: `verify_tls` defaults to `True` and is passed as
+  `verify=True` when unset; setting it `False` passes `verify=False` through to the mocked
+  `requests.get` call. Existing request-shape test updated to expect the new `verify=True`
+  kwarg alongside the others.
+- `mkdocs build --strict` clean after documenting it in the README's landing-check section.
+- Full suite: **110/110 passed** (108 + 2 new unit tests).

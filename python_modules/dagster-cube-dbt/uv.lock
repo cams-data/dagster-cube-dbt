@@ -319,13 +319,14 @@ wheels = [
 
 [[package]]
 name = "dagster-cube-dbt"
-version = "0.1.1"
+version = "0.1.4"
 source = { editable = "." }
 dependencies = [
     { name = "dagster" },
     { name = "dagster-dbt" },
     { name = "deepmerge" },
     { name = "pyyaml" },
+    { name = "requests" },
 ]
 
 [package.optional-dependencies]
@@ -350,6 +351,7 @@ requires-dist = [
     { name = "mkdocs-material", marker = "extra == 'docs'" },
     { name = "mkdocstrings", extras = ["python"], marker = "extra == 'docs'" },
     { name = "pyyaml" },
+    { name = "requests" },
 ]
 provides-extras = ["docs"]
 
