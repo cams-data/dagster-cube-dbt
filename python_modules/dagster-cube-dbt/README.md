@@ -335,6 +335,70 @@ same contract `CubeFilePromoter.promote` itself has — since a failed run leave
 `code_version` unchanged, the next automation evaluation just retries the whole
 promote-then-poll cycle.
 
+## Syncing views into Apache Superset
+
+A separate, standalone component — `CubeSupersetSyncComponent` — syncs each generated Cube
+**view** (not cubes — Cube's own convention is that views are the intended BI-facing query
+layer) into a matching [Apache Superset](https://superset.apache.org/) dataset: column
+`verbose_name`/`description`/groupby/filter flags from the view's dimensions, and one metric
+per measure, expressed via Cube SQL API's own aggregation-pushdown syntax
+(`MEASURE(<view>.<measure>)`) so Cube — not Superset — performs the aggregation. This gives BI
+users column descriptions and pre-defined metrics for every view without anyone manually
+configuring datasets in Superset by hand.
+
+It's a separate component chained onto a `CubeDbtProjectComponent` via `context.load_component`
+— reading that component's already-generated, cached state directly — rather than a subclass,
+so `project:`/`cube_select:`/merge-patch config lives in exactly one `defs.yaml` block, not
+duplicated across two. Not re-exported from the top-level `dagster_cube_dbt` module (unlike
+`CubeDbtProjectComponent`) — that module is imported unconditionally by anything importing
+`dagster_cube_dbt` at all, and this component's own resource (`SupersetResource`) pulls in
+`requests`, so both are referenced by their full dotted path instead:
+
+```yaml
+# defs.yaml, e.g. defs/superset_sync/defs.yaml
+type: dagster_cube_dbt.components.cube_superset_sync.component.CubeSupersetSyncComponent
+attributes:
+  dbt_cube_component: "../dbt_ingest"   # path to the CubeDbtProjectComponent's defs.yaml dir
+  database_name: "Cube"                 # default; the Superset database connection's name
+```
+
+```python
+# e.g. defs/resources.py
+import dagster as dg
+from dagster_cube_dbt.superset_resource import SupersetResource
+
+@dg.definitions
+def resources():
+    return dg.Definitions(
+        resources={
+            "superset": SupersetResource(
+                base_url="https://superset.example.com",
+                username=dg.EnvVar("SUPERSET_USERNAME"),
+                password=dg.EnvVar("SUPERSET_PASSWORD"),
+            )
+        }
+    )
+```
+
+| Attribute | Description |
+|---|---|
+| `dbt_cube_component` | Path to the `CubeDbtProjectComponent`'s `defs.yaml` directory, resolved relative to the defs root. |
+| `database_name` | Name of the Superset database connection pointed at Cube's SQL API. Defaults to `"Cube"`. This component doesn't create that connection — set it up once in Superset yourself, the same way `CubeDbtProjectComponent` assumes a running Cube instance already exists rather than provisioning one. |
+| `superset_resource_key` | Resource key of the `SupersetResource` this component syncs through. Defaults to `"superset"`. |
+| `sync_pool` | Dagster concurrency pool assigned to the dataset-sync multi-asset's op. Defaults to a name scoped to `dbt_cube_component` — set a max concurrency of 1 for it in the Dagster UI if two runs syncing the same Superset dataset concurrently turns out to be a problem, mirroring `promotion_pool` above. |
+
+Each dataset asset depends on the corresponding view asset (through the sibling component's own
+`get_view_asset_spec`/`asset_key_for_view` — so a subclass renaming view keys is still
+respected automatically) and reuses `GENERATED_ASSET_AUTOMATION_CONDITION`: a dataset only
+needs updating when the view's own generated definition changes (its `code_version`), not on
+every dbt data refresh underneath it.
+
+`SupersetResource` handles the login/CSRF/find-or-create-dataset/refresh/update-columns flow
+against Superset's own REST API, authenticating once per resource instance rather than once per
+dataset. `password` (like `CubeRestApiClient.api_token`) is a plain `str` config field — bind it
+from wherever your project already manages secrets (`dg.EnvVar(...)`, as above), not a literal
+value in checked-in `defs.yaml`.
+
 ## Base generation rules
 
 For each dbt model, reading `manifest.json` directly (see `manifest.py` — this library has no

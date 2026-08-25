@@ -34,3 +34,14 @@ narrative usage docs (dbt conventions, merge patches, promotion resources, etc).
 ## `CubeRestApiClient`
 
 ::: dagster_cube_dbt.CubeRestApiClient
+
+## `CubeSupersetSyncComponent`
+
+Not re-exported from the top-level `dagster_cube_dbt` module -- see
+[Syncing views into Apache Superset](index.md#syncing-views-into-apache-superset) for why.
+
+::: dagster_cube_dbt.components.cube_superset_sync.component.CubeSupersetSyncComponent
+
+## `SupersetResource`
+
+::: dagster_cube_dbt.superset_resource.SupersetResource
