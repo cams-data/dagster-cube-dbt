@@ -2709,3 +2709,21 @@ free to change.
 - Confirmed the same way as every prior phase: reverted just the fix (kept the new test),
   watched it reproduce the exact reported `KeyError`, restored the fix, watched it pass.
 - Full suite: **108/108 passed** (107 + this new regression test).
+
+## Phase 41 -- `CubeRestApiClient.verify_tls`: an escape hatch for self-signed/internal-CA certs
+
+Small, user-requested addition: a `verify_tls: bool = True` field on `CubeRestApiClient`, passed
+straight through as `requests.get(..., verify=self.verify_tls)`. Needed for deployments the
+resource can't otherwise reach with a certificate that validates against the system trust
+store (a self-hosted Cube instance behind a self-signed or internal-CA cert being the obvious
+case). Defaults to `True` (verify, matching `requests`' own default) -- opting out is explicit,
+not something a project falls into by omission.
+
+### Verification
+
+- New unit tests in `test_landing_check.py`: `verify_tls` defaults to `True` and is passed as
+  `verify=True` when unset; setting it `False` passes `verify=False` through to the mocked
+  `requests.get` call. Existing request-shape test updated to expect the new `verify=True`
+  kwarg alongside the others.
+- `mkdocs build --strict` clean after documenting it in the README's landing-check section.
+- Full suite: **110/110 passed** (108 + 2 new unit tests).

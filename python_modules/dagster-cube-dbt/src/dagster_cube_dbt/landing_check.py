@@ -73,16 +73,26 @@ class CubeRestApiClient(CubeApiClient):
     rules, is left entirely to the caller -- bind this resource with a token from wherever your
     project already manages secrets (e.g. `EnvVar("CUBE_API_TOKEN")`), the same pattern as any
     other credentialed Dagster resource.
+
+    `verify_tls` defaults to `True` (verify the server's certificate, `requests`' own default).
+    Set it to `False` only for a deployment you can't otherwise reach with a valid certificate
+    (a self-hosted instance behind a self-signed or internal-CA cert, most often) -- this
+    disables certificate verification entirely for every request this resource makes, the same
+    way `requests.get(..., verify=False)` does, so treat it the same as you would that call:
+    fine for a trusted internal network, not something to reach for to route around an
+    otherwise-fixable certificate problem.
     """
 
     api_url: str
     api_token: str
+    verify_tls: bool = True
 
     def fetch_meta(self) -> dict[str, Any]:
         response = requests.get(
             f"{self.api_url.rstrip('/')}/meta",
             headers={"Authorization": self.api_token},
             timeout=30,
+            verify=self.verify_tls,
         )
         response.raise_for_status()
         return response.json()

@@ -319,6 +319,13 @@ it needs for your deployment's access rules, is left entirely to you; `CubeRestA
 doesn't sign one itself. Implement `CubeApiClient` directly instead if your setup needs
 something other than a straight `GET {api_url}/meta` call (e.g. a proxy in front of Cube).
 
+`verify_tls` (default `True`) controls certificate verification, passed straight through to
+the underlying `requests.get(..., verify=...)` call. Set it to `False` only for a deployment
+you can't otherwise reach with a valid certificate — a self-hosted instance behind a
+self-signed or internal-CA cert, most often — and treat it with the same caution you would
+`requests`' own `verify=False`: it disables certificate verification entirely for every
+request this resource makes.
+
 Off by default: it needs Cube API credentials and adds latency (at least one HTTP round trip,
 likely several while waiting for Cube to catch up) to every promotion, which not every project
 needs. When off, promoted YAML is byte-identical to what it would be without this feature at

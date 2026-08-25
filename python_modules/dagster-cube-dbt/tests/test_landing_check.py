@@ -62,6 +62,7 @@ def test_cube_rest_api_client_sends_bare_token_not_bearer_scheme():
         "https://example.cubecloudapp.dev/cubejs-api/v1/meta",
         headers={"Authorization": "a.jwt.token"},
         timeout=30,
+        verify=True,
     )
     mock_response.raise_for_status.assert_called_once()
 
@@ -75,6 +76,30 @@ def test_cube_rest_api_client_strips_trailing_slash_from_api_url():
         client.fetch_meta()
 
     assert mock_get.call_args.args[0] == "https://example.cubecloudapp.dev/cubejs-api/v1/meta"
+
+
+def test_cube_rest_api_client_verify_tls_defaults_to_true():
+    client = CubeRestApiClient(api_url="https://example.cubecloudapp.dev/cubejs-api/v1", api_token="tok")
+
+    mock_response = MagicMock()
+    mock_response.json.return_value = {"cubes": []}
+    with patch("dagster_cube_dbt.landing_check.requests.get", return_value=mock_response) as mock_get:
+        client.fetch_meta()
+
+    assert mock_get.call_args.kwargs["verify"] is True
+
+
+def test_cube_rest_api_client_verify_tls_false_disables_certificate_verification():
+    client = CubeRestApiClient(
+        api_url="https://example.cubecloudapp.dev/cubejs-api/v1", api_token="tok", verify_tls=False
+    )
+
+    mock_response = MagicMock()
+    mock_response.json.return_value = {"cubes": []}
+    with patch("dagster_cube_dbt.landing_check.requests.get", return_value=mock_response) as mock_get:
+        client.fetch_meta()
+
+    assert mock_get.call_args.kwargs["verify"] is False
 
 
 def _client_with_responses(responses: list[dict]) -> CubeApiClient:
