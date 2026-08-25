@@ -2727,3 +2727,111 @@ not something a project falls into by omission.
   kwarg alongside the others.
 - `mkdocs build --strict` clean after documenting it in the README's landing-check section.
 - Full suite: **110/110 passed** (108 + 2 new unit tests).
+
+## Phase 42 -- `CubeSupersetSyncComponent` and `SupersetResource`: the Superset dataset sync
+
+The feature scoped in `SUPERSET_SYNC_PLAN.md` (written up ahead of implementation, after Phase
+39 deliberately deferred it in favor of `landing_check` first). Implemented in stages, each
+committed separately: extract `cube_state.py` (pure refactor, full suite unchanged before
+anything Superset-specific landed), `SupersetResource`, `CubeSupersetSyncComponent`, docs.
+
+### Decisions
+
+- **Component chaining, confirmed working exactly as the plan sketched it**:
+  `context.load_component(self.dbt_cube_component, CubeDbtProjectComponent)` plus
+  `DefinitionsLoadContext.get().state_path(sibling.defs_state_config, DefsStateStorage.get(),
+  context.project_root)` (a context manager, not a plain call -- state-reading has to happen
+  inside the `with` block, since `VERSIONED_STATE_STORAGE`/`LEGACY_CODE_SERVER_SNAPSHOTS` state
+  paths live in a `TemporaryDirectory` that's cleaned up on exit). One thing the plan didn't
+  anticipate, verified only by reading the installed `dagster` package directly: neither
+  `DefinitionsLoadContext` nor `DefsStateStorage` is re-exported from `dagster`'s public
+  surface (`dagster`/`dagster.components`) as of the pinned `dagster~=1.13.0` -- imported from
+  their real, private-module locations (`dagster._core.definitions.definitions_load_context`,
+  `dagster._core.storage.defs_state.base`) instead, the same modules
+  `StateBackedComponent.build_defs` itself imports internally to implement this exact contract.
+  Fragile against a future dagster release moving those modules, but there's no public
+  alternative to depend on instead, and it's literally the base class's own real implementation,
+  not a guess at one.
+- **No `[superset]` extra** -- the plan's original rationale (keep `requests` out of the base
+  install) was written before Phase 39 made `requests` a base dependency for `landing_check`;
+  Phase 39's own writeup already flagged this as a "still-hypothetical" future non-issue for
+  Superset. Confirmed via `uv sync` (no extras) needing zero new packages beyond what Phase 39
+  already added. `CubeSupersetSyncComponent`/`SupersetResource` still aren't re-exported from
+  the top-level `dagster_cube_dbt` module, though -- that stays useful independent of the
+  dependency question, keeping that module's own import surface minimal for anyone who only
+  wants `CubeDbtProjectComponent`.
+- **`SupersetResource`'s request/response shapes verified against a real, working reference
+  implementation** (`ponderedw/dbt-to-cube`'s `SupersetConnector`), fetched and read directly
+  (both via `WebFetch` and a raw `curl`, to see the literal source rather than a paraphrase) --
+  not guessed from Superset's own REST API reference docs alone, the same standard Phase 39 set
+  for the Cube-side API. Two deliberate deviations from that reference, not blind copying:
+  - It sleeps a fixed 2 seconds after `PUT .../refresh` and hopes columns are populated by then.
+    `SupersetResource` polls instead (bounded by `refresh_timeout_seconds`/
+    `refresh_poll_interval_seconds`), mirroring the "poll, don't guess a sleep" shape
+    `landing_check.wait_for_landing` already established for the Cube-side propagation problem
+    -- directly resolving the plan's own "Open questions" note that flagged the fixed sleep as
+    something to fix, not leave as a TODO.
+  - The reference computes a Cube-dimension-type -> Superset-SQL-type mapping table but, reading
+    closely, never actually sends it in the column-update payload -- Superset's own table
+    introspection is authoritative for a column's real SQL type after `refresh`, so there was
+    nothing for this resource to override there either. Dropped the mapping table entirely
+    rather than keeping unused code around "for documentation."
+- **No real Superset instance in CI** (same constraint `landing_check` has for Cube) --
+  `SupersetResource` is unit-tested against a scripted fake `requests.Session` (swap the
+  private `_session` `PrivateAttr` for a `MagicMock` with a `side_effect` list per method,
+  mirroring `test_landing_check.py`'s scripted-response style). This means the exact Rison/JSON
+  `q`-param encoding, the `rel_o_m` filter operator, and the read-only-field-stripping list are
+  only as trustworthy as the reference implementation they came from -- real, working code, but
+  unverified against a live Superset instance by this project itself. Worth flagging to a user
+  trying this feature for the first time, not something to claim more confidence in than earned.
+- **View-member resolution (`_resolve_view_members`)**: `generate_cubes` never produces views at
+  all -- only cubes; views are entirely hand-authored via merge patches, referencing member
+  cubes through `cubes: [{join_path, includes, excludes}]`. Superset needs the *resolved* column
+  list, so this walks that same declaration against the sibling's `resolve_extends`-flattened
+  cubes, supporting `includes: "*"`, an explicit `includes` list, and `excludes`. Cube's
+  `prefix`/member-aliasing option isn't handled -- not exercised by this project's own
+  generation output or any fixture/production case so far; a view using it will under-resolve.
+  `join_path.split(".")[0]` (a multi-hop join path's first segment, not necessarily the actual
+  target cube for a two-hop join) deliberately mirrors `get_view_asset_spec`'s own existing
+  single-hop assumption for the same lookup, rather than inventing separate -- and possibly
+  diverging -- multi-hop handling that the rest of this codebase doesn't have either.
+- **Dependency and `code_version` come from the sibling's own `get_view_asset_spec(view)`**, not
+  `asset_key_for_view(name)` plus a freshly recomputed hash -- the exact override-safe pattern
+  `get_cube_asset_spec`'s own docstring documents (Phase 37/40's lesson: never derive identity
+  from a guessed `AssetKey` shape, always go through the same overridable method). Also means a
+  subclass override of `get_view_asset_spec` that changes what "the view's definition" even
+  means (e.g. folding in extra metadata) is automatically reflected in when the Superset dataset
+  re-syncs, with no extra work.
+- **`build_defs` split into `build_defs_from_sibling_state`** (mirroring
+  `CubeDbtProjectComponent.write_state_to_path`/`build_defs_from_state`'s own split) --
+  deliberately, so tests can exercise the real spec/deps/op logic against a directly-constructed
+  sibling instance and state path, the same way every existing test in this codebase already
+  tests `CubeDbtProjectComponent` (none of them go through `context.load_component` or a real
+  on-disk defs tree either). **Known, deliberate coverage gap**: `context.load_component` itself
+  and the `state_path()` context manager are not exercised end-to-end by this project's test
+  suite -- standing up a real `ComponentTree`/on-disk defs tree for that (`ComponentTree.
+  for_project`/`from_module`, real `defs.yaml` files, an importable temp package) is
+  meaningfully heavier machinery than this codebase's testing style has ever used, and the
+  higher-value, project-specific risk (state-backed-ness, override-safety) is fully covered
+  without it. `context.load_component`/`state_path()` are dagster's own public/quasi-public
+  API, not something this project needs to re-verify to this depth.
+
+### Verification
+
+- New `tests/test_superset_resource.py` (9 tests): full create/reuse-existing dataset flows
+  against the scripted session, database-not-found raising `dg.Failure`, session/login reuse
+  across multiple `sync_dataset` calls, read-only-field stripping, case-insensitive column
+  matching, the refresh-poll loop actually polling (not just accepting an empty first response),
+  and `_verbose_name`'s title-vs-generated-name fallback.
+- New `tests/test_cube_superset_sync_component.py` (11 tests), including the two chaining-shaped
+  regression tests the plan called for: `test_build_defs_from_sibling_state_does_not_need_the_
+  live_dbt_project_directory` (real `DbtProjectArgsManager` pointed at a throwaway copy of the
+  fixture project, deleted before defs are built -- mirrors Phase 36's own test exactly) and
+  `test_a_subclass_renaming_the_view_key_is_reflected_in_the_dataset_deps` (mirrors Phase 37/40's
+  `RenamingComponent` pattern, overriding `get_view_asset_spec` instead of `get_cube_asset_spec`).
+  Plus a real `dg.materialize` test proving the multi-asset op actually calls `sync_dataset` with
+  the right `table_name`/`schema`/resolved dimension and measure names, and direct unit tests of
+  `_resolve_view_members`'s `"*"`/list-`includes`/`excludes`/unknown-cube/dotted-join-path
+  behavior against small hand-built dicts (not coupled to the shared fixture project's exact
+  shape).
+- Full suite: **130/130 passed** (110 + 9 resource unit tests + 11 component tests).

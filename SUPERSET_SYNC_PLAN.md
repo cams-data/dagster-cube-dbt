@@ -1,8 +1,10 @@
 # Superset dataset sync -- development plan
 
-**Status**: Planning. Not started. This is a large, separable addition on top of the
-`CubeDbtProjectComponent` work tracked in [PLAN.md](PLAN.md)/[DECISIONS.md](DECISIONS.md); this
-file tracks it independently rather than folding it into those.
+**Status**: Implemented (`CubeSupersetSyncComponent` + `SupersetResource`, see DECISIONS.md
+Phase 42 for what actually happened and what deviated from this plan along the way). This was a
+large, separable addition on top of the `CubeDbtProjectComponent` work tracked in
+[PLAN.md](PLAN.md)/[DECISIONS.md](DECISIONS.md); this file tracked it independently rather than
+folding it into those, and stays as the design record.
 
 ## Goal
 
