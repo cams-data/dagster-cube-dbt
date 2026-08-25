@@ -6,7 +6,6 @@ See the package README for the full generation and merge-patch model this implem
 """
 
 import hashlib
-import json
 import tempfile
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -22,13 +21,13 @@ from dagster_dbt.dagster_dbt_translator import validate_translator
 from dagster_dbt.dbt_manifest import validate_manifest
 from dagster_dbt.utils import ASSET_RESOURCE_TYPES
 
+from dagster_cube_dbt.cube_state import CUBE_STATE_FILENAME, read_cube_state, write_cube_state
 from dagster_cube_dbt.generation import generate_cubes
 from dagster_cube_dbt.landing_check import wait_for_landing, with_landing_check_meta
 from dagster_cube_dbt.merge import discover_patch_files, merge_documents, resolve_extends
 from dagster_cube_dbt.output import write_entities
 
 DEFS_YAML_FILENAME = "defs.yaml"
-CUBE_STATE_FILENAME = "cube_dbt_state.json"
 CUBE_KEY_PREFIX = "cube"
 VIEW_KEY_PREFIX = "cube_view"
 
@@ -366,12 +365,7 @@ class CubeDbtProjectComponent(DbtProjectComponent):
             for patch_file in discover_patch_files(self._defs_dir, exclude=exclude)
         ]
         merged = merge_documents(base, patches)
-
-        # `state_path` itself is a sentinel file `DbtProjectManager.prepare` touches, not a
-        # directory -- its real per-key working directory is `state_path.parent` (already
-        # created by the `super()` call above), so our own cached data goes there instead,
-        # under a filename that won't collide with dagster_dbt's own "project" subdirectory.
-        (state_path.parent / CUBE_STATE_FILENAME).write_text(json.dumps(merged))
+        write_cube_state(state_path, merged)
 
     def build_defs_from_state(
         self, context: dg.ComponentLoadContext, state_path: Path | None
@@ -393,14 +387,7 @@ class CubeDbtProjectComponent(DbtProjectComponent):
         self._state_aware_manifest = validate_manifest(state_aware_project.manifest_path)
         self._state_aware_project = state_aware_project
 
-        state_file = state_path.parent / CUBE_STATE_FILENAME if state_path else None
-        if state_file is None or not state_file.exists():
-            raise dg.DagsterInvalidDefinitionError(
-                "No generated cube state found. Run `dg utils refresh-defs-state` to "
-                "generate it before loading definitions."
-            )
-
-        merged = json.loads(state_file.read_text())
+        merged = read_cube_state(state_path)
         cubes = merged.get("cubes", [])
         views = merged.get("views", [])
         # {cube_name: dbt_model_name} for cubes renamed via `meta.cube.name`/`suffix` -- not
