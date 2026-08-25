@@ -928,11 +928,17 @@ access can do this):
    **Contents: Read and write** repository permission (covers both pushing commits and
    creating GitHub Releases via the API -- no other permission needed) and no webhook.
 2. Install it on this repository only.
-3. Generate a private key for the app (downloads a `.pem` file).
-4. Store the App ID as a repo **variable** named `RELEASE_APP_ID`, and the private key's full
-   contents as a repo **secret** named `RELEASE_APP_PRIVATE_KEY`.
+3. On the App's settings page, **Generate a private key** (downloads a `.pem` file) -- this
+   step is easy to miss, and skipping it fails token generation at run time with `Integration
+   must generate a public key`, not an obviously-related error.
+4. Store the App's **Client ID** (not its numeric App ID -- `actions/create-github-app-token`
+   wants the former) as a repo **variable** named `RELEASE_APP_CLIENT_ID`, and the private
+   key's full contents -- including the `-----BEGIN`/`-----END` lines -- as a repo **secret**
+   named `RELEASE_APP_PRIVATE_KEY`.
 5. Add the App to the ruleset's bypass list (Settings → Rules → Rulesets → the ruleset
-   targeting `main`/`next` → Bypass list → Apps).
+   targeting `main`/`next` → Bypass list → Apps), with bypass mode **Exempt** -- "Always"
+   still evaluates the ruleset as an interactive "break glass" confirmation, which a
+   non-interactive `git push` from CI has no way to respond to.
 
 ## Documentation
 
