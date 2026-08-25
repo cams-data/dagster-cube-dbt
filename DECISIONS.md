@@ -2521,3 +2521,53 @@ equivalent mechanism.)
 - Confirmed the same way as Phase 36's test: reverted just the fix, watched this new test fail
   with the wrong (un-renamed) dependency key, restored the fix, watched it pass.
 - Full suite: **97/97 passed** (96 + this new regression test).
+
+## Phase 38 — `GENERATED_ASSET_AUTOMATION_CONDITION` fired on a cube's own definition change even while its dbt model dep was missing or in progress
+
+The user reported: "I think we may have the logic for `GENERATED_ASSET_AUTOMATION_CONDITION`
+wrong. We don't want it to fire if it has a new code version, but deps missing or deps in
+progress? Right now if I update a cube definition and haven't ran the dbt model, the cube def
+will start running right away, but the table it needs to actually work isn't even in the
+database yet."
+
+Confirmed by reading the condition (built back in Phase 7/8): the `missing()` branch was
+correctly gated with `& ~any_deps_missing() & ~any_deps_in_progress()`, but the
+`code_version_changed()` branch, OR'd in alongside it, had no such gate at all -- it fired
+purely on the cube/view's own generated YAML hash changing, regardless of whether the dbt
+model backing it had ever materialized or was mid-run. The block comment above it explained in
+detail why `code_version_changed()` doesn't need the `newly_true()`/`since_last_handled()`
+wrapping the `missing()` branch needs (it "stays true... until the tick it's actually
+evaluated as part of a request," so it isn't lost like a raw edge-triggered condition would
+be) -- but never actually applied a deps-readiness gate to it, and didn't claim to. That
+omission is exactly the bug: editing a cube's definition (e.g. a merge-patch edit changing its
+`title`) before its backing dbt model had ever run fired a request for the cube asset anyway,
+against a table that doesn't exist yet.
+
+### Decisions
+
+- Factored the deps-ready gate (`~any_deps_missing() & ~any_deps_in_progress()`) out to
+  `_DEPS_READY` and applied it to *both* branches: `(missing() & _DEPS_READY).newly_true()
+  .since_last_handled()` as before, and now also `code_version_changed() & _DEPS_READY`.
+- Applying the gate to `code_version_changed()` by a plain trailing `&` (not wrapped inside a
+  `newly_true()` alongside it, the way `missing()` needed) is deliberate, not an oversight
+  paralleling the earlier `missing()`-gate mistake documented in Phase 7/8's comment: the
+  reason that trailing-AND pattern loses the transition for `missing()` is that `missing()`'s
+  own `newly_true()` pulse is what's being tracked, and once that one-tick pulse is consumed
+  (or blocked at exactly the wrong tick), it doesn't recur just because the deps gate later
+  opens. `code_version_changed()` isn't pulsed that way -- per the existing comment, it holds
+  true continuously until actually consumed by a request -- so a request blocked one tick by
+  `_DEPS_READY` still fires the very next tick the gate opens, without needing the transition
+  to be captured inside a wrap. This was verified against a real tick sequence, not assumed
+  from the reasoning alone (see Verification).
+
+### Verification
+
+- New `test_generated_asset_automation_condition_does_not_fire_on_code_version_change_while_dep_missing`:
+  edits a cube's definition (title merge-patch) while its dbt model has never materialized,
+  asserts zero requests across several ticks with the dep still missing, then materializes the
+  dbt model and asserts the cube is requested exactly once right after -- i.e. the pending
+  `code_version_changed()` isn't lost while blocked, and fires as soon as the gate opens.
+- Confirmed the same way as Phases 36-37: reverted just the fix (kept the new test), watched it
+  fail (`1 == 0` at the tick where the definition changes, before the model has materialized --
+  the exact bug the user reported), restored the fix, watched it pass.
+- Full suite: **98/98 passed** (97 + this new regression test).

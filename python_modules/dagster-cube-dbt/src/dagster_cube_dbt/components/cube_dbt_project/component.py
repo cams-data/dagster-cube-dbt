@@ -166,19 +166,25 @@ def _code_version(entity: Mapping[str, Any]) -> str:
 # `evaluate_automation_conditions` tick sequence -- see DECISIONS.md -- not assumed from
 # reading dagster's own source or docs alone.
 #
-# `code_version_changed()` needs no such wrapping: unlike a one-tick pulse, it stays true
-# from the tick the version changes until the tick it's actually evaluated as part of a
-# request, so it isn't lost the same way a raw edge-triggered condition would be.
+# `code_version_changed()` needs no `newly_true()`/`since_last_handled()` wrapping: unlike a
+# one-tick pulse, it stays true from the tick the version changes until the tick it's
+# actually evaluated as part of a request, so it isn't lost the same way a raw edge-triggered
+# condition would be -- and, unlike `missing()`, applying the deps-ready gate to it afterwards
+# (rather than inside a `newly_true()` wrap) is fine for the same reason: since it doesn't
+# self-expire before being consumed, a request blocked by the gate one tick still fires the
+# next tick the gate opens, instead of the transition being lost.
+#
+# But it still needs that deps-ready gate applied at all -- editing a cube/view's own
+# definition (title, measures, ...) before its backing dbt model has ever run (or while a
+# dbt run is still in progress) must not fire a request for it; the model's table won't
+# exist yet, so the run would just fail. Without this, `code_version_changed()` alone fires
+# regardless of dep state, which is the bug this was written to fix (see DECISIONS.md).
+_DEPS_READY = ~dg.AutomationCondition.any_deps_missing() & ~dg.AutomationCondition.any_deps_in_progress()
+
 GENERATED_ASSET_AUTOMATION_CONDITION = (
     (
-        (
-            dg.AutomationCondition.missing()
-            & ~dg.AutomationCondition.any_deps_missing()
-            & ~dg.AutomationCondition.any_deps_in_progress()
-        )
-        .newly_true()
-        .since_last_handled()
-        | dg.AutomationCondition.code_version_changed()
+        (dg.AutomationCondition.missing() & _DEPS_READY).newly_true().since_last_handled()
+        | (dg.AutomationCondition.code_version_changed() & _DEPS_READY)
     )
     & ~dg.AutomationCondition.in_progress()
 ).with_label("cube_code_version_changed")

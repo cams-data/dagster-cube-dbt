@@ -7,7 +7,10 @@ via an actual production deployment after Stage 20 shipped, both fixed: `build_d
 silently required the live dbt project directory at deploy time (DECISIONS.md Phase 36), and
 `get_cube_asset_spec`'s `extends`-dependency resolution didn't respect a subclass overriding it
 to rename cube keys (Phase 37 -- surfaced by fixing Phase 36, itself a real regression, caught
-before merge). 97 tests passing throughout: `python_modules/dagster-cube-dbt/tests/`,
+before merge). A third bug, found via real usage rather than deployment: `GENERATED_ASSET_
+AUTOMATION_CONDITION`'s `code_version_changed()` branch had no deps-readiness gate, so editing
+a cube's own definition before its backing dbt model had ever run fired a request against a
+table that didn't exist yet (Phase 38). 98 tests passing throughout: `python_modules/dagster-cube-dbt/tests/`,
 run against both dbt-core and dbt Fusion — see Stage 5/8/9/10/11/12/13/14/15/16/17/18/19/20/21/22 and DECISIONS.md.
 Stage 1's fixture ended up in two forms — a library-internal one (`tests/fixtures/dbt_project`,
 used directly by the test suite) and a separate `dg`-runnable example project
