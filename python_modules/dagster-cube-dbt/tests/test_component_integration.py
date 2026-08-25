@@ -900,3 +900,68 @@ def test_generated_asset_automation_condition_does_not_duplicate_request_while_p
             defs=defs, instance=instance, asset_selection=selection, cursor=result.cursor
         )
         assert result.total_requested == 0
+
+
+def test_generated_asset_automation_condition_does_not_fire_on_code_version_change_while_dep_missing(
+    tmp_path, defs_dir
+):
+    """Regression test for a real bug: editing a cube's own definition (changing its
+    `code_version`) before the dbt model backing it has ever materialized used to fire a
+    request for the cube right away -- even though the table it needs doesn't exist in the
+    database yet, so the run would just fail. `code_version_changed()` must be gated by the
+    same deps-ready check `missing()` already is, not left ungated.
+    """
+    component = _make_component(defs_dir)
+    state_path = tmp_path / "state"
+    component.write_state_to_path(state_path)
+
+    context = dg.ComponentTree.for_test().load_context
+    defs = _with_promoter(component.build_defs_from_state(context, state_path), NoopCubeFilePromoter())
+
+    journey_samples_key = component.asset_key_for_cube("journey_samples")
+    model_key = component.asset_key_for_model("journey_samples")
+    selection = dg.AssetSelection.assets(journey_samples_key)
+
+    instance = dg.DagsterInstance.ephemeral()
+
+    # tick 1: baseline evaluation, dbt model never materialized -> suppressed either way.
+    result = dg.evaluate_automation_conditions(
+        defs=defs, instance=instance, asset_selection=selection
+    )
+    assert result.total_requested == 0
+
+    # the cube's own generated definition changes (e.g. a merge patch edit) while the dbt
+    # model dep is still missing -- must NOT fire a request; the model hasn't run yet.
+    (defs_dir / "title_patch.yaml").write_text(
+        "cubes:\n  - name: journey_samples\n    title: Changed Title\n"
+    )
+    component.write_state_to_path(state_path)
+    changed_defs = _with_promoter(
+        component.build_defs_from_state(context, state_path), NoopCubeFilePromoter()
+    )
+    result = dg.evaluate_automation_conditions(
+        defs=changed_defs, instance=instance, asset_selection=selection, cursor=result.cursor
+    )
+    assert result.total_requested == 0
+
+    # still blocked a couple more ticks with the dep still missing.
+    for _ in range(2):
+        result = dg.evaluate_automation_conditions(
+            defs=changed_defs, instance=instance, asset_selection=selection, cursor=result.cursor
+        )
+        assert result.total_requested == 0
+
+    # the dbt model finally materializes -> the pending code_version_changed() (which,
+    # unlike missing(), doesn't self-expire while blocked) is no longer lost: fires exactly
+    # once now that the dep is actually ready.
+    instance.report_runless_asset_event(dg.AssetMaterialization(asset_key=model_key))
+    result = dg.evaluate_automation_conditions(
+        defs=changed_defs, instance=instance, asset_selection=selection, cursor=result.cursor
+    )
+    assert result.total_requested == 1
+
+    # nothing further changed -> not re-requested.
+    result = dg.evaluate_automation_conditions(
+        defs=changed_defs, instance=instance, asset_selection=selection, cursor=result.cursor
+    )
+    assert result.total_requested == 0
