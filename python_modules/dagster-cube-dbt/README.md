@@ -928,13 +928,15 @@ access can do this):
    **Contents: Read and write** repository permission (covers both pushing commits and
    creating GitHub Releases via the API -- no other permission needed) and no webhook.
 2. Install it on this repository only.
-3. On the App's settings page, **Generate a private key** (downloads a `.pem` file) -- this
-   step is easy to miss, and skipping it fails token generation at run time with `Integration
-   must generate a public key`, not an obviously-related error.
-4. Store the App's **Client ID** (not its numeric App ID -- `actions/create-github-app-token`
-   wants the former) as a repo **variable** named `RELEASE_APP_CLIENT_ID`, and the private
-   key's full contents -- including the `-----BEGIN`/`-----END` lines -- as a repo **secret**
-   named `RELEASE_APP_PRIVATE_KEY`.
+3. On the App's settings page, **Generate a private key** (downloads a `.pem` file).
+4. Store the App's **Client ID** as a repo **variable** named `RELEASE_APP_CLIENT_ID`, and the
+   private key's full contents -- including the `-----BEGIN`/`-----END` lines -- as a repo
+   **secret** named `RELEASE_APP_PRIVATE_KEY`. Use the **Client ID**, not the numeric App ID --
+   `actions/create-github-app-token`'s `app-id` input is deprecated in favor of `client-id`,
+   and in this project's own setup, using `app-id` (with a real, already-generated private key)
+   produced a `401 Integration must generate a public key` error that `client-id` didn't --
+   confirmed by fixing it, not fully explained by GitHub's error message, which points at a
+   missing key even though one existed.
 5. Add the App to the ruleset's bypass list (Settings → Rules → Rulesets → the ruleset
    targeting `main`/`next` → Bypass list → Apps), with bypass mode **Exempt** -- "Always"
    still evaluates the ruleset as an interactive "break glass" confirmation, which a
