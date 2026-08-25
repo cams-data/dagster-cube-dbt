@@ -23,6 +23,7 @@ dependencies = [
     "dagster-dbt",
     "pyyaml",
     "deepmerge",
+    "requests",
 ]
 
 [project.optional-dependencies]
@@ -64,6 +65,7 @@ dependencies = [
     "dagster-dbt",
     "pyyaml",
     "deepmerge",
+    "requests",
 ]
 
 [[tool.hatch.envs.test.matrix]]

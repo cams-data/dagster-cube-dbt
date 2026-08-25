@@ -47,7 +47,12 @@ on top of it — one dbt translator, one set of dbt CLI settings, for both conce
    `code_version` hash of its YAML), not on every dbt model data update the way
    `AutomationCondition.eager()` would. A downstream pre-aggregation asset's own freshness
    doesn't depend on that ever happening either way — Dagster resolves it by looking through
-   the virtual cube straight to the dbt model.
+   the virtual cube straight to the dbt model. By default a cube/view is considered
+   materialized as soon as the promoter returns — which only means the generated YAML was
+   handed off, not that a running Cube instance has actually picked it up yet. Set
+   `landing_check` (needs a `CubeApiClient`, e.g. `CubeRestApiClient`) to instead poll Cube's
+   own REST API after promotion and block materialization until the promoted content is
+   actually visible there.
 
 See [PLAN.md](PLAN.md) for the development roadmap and [DECISIONS.md](DECISIONS.md) for a
 running log of implementation decisions, issues found, and assumptions made along the way.

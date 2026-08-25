@@ -18,8 +18,10 @@ from dagster_dbt.dbt_project_manager import DbtProjectArgsManager
 from dagster_cube_dbt.components.cube_dbt_project.component import (
     CUBE_STATE_FILENAME,
     CubeDbtProjectComponent,
+    CubeLandingCheck,
     CubeSelect,
 )
+from dagster_cube_dbt.landing_check import LANDING_CHECK_META_KEY, CubeApiClient
 from dagster_cube_dbt.output import read_entities
 from dagster_cube_dbt.resources import CubeFilePromoter, LocalFileCubeFilePromoter
 from dbt_engine import DBT_TARGET
@@ -104,6 +106,23 @@ class NoopCubeFilePromoter(CubeFilePromoter):
 
     def promote(self, context: dg.AssetExecutionContext, cubes_dir: Path, views_dir: Path) -> None:
         return
+
+
+def _scripted_cube_api_client(responses: list[dict]) -> CubeApiClient:
+    """A `CubeApiClient` test double returning canned `/meta`-shaped responses in order (the
+    last one repeats once exhausted), so `wait_for_landing`'s polling loop can be exercised
+    without a real Cube instance. Call count captured via closure, not an instance attribute --
+    same copy-safety concern `_recording_promoter` documents.
+    """
+    calls = {"count": 0}
+
+    class _ScriptedCubeApiClient(CubeApiClient):
+        def fetch_meta(self) -> dict:
+            index = min(calls["count"], len(responses) - 1)
+            calls["count"] += 1
+            return responses[index]
+
+    return _ScriptedCubeApiClient()
 
 
 def _make_component(defs_dir: Path, **kwargs) -> CubeDbtProjectComponent:
@@ -720,6 +739,113 @@ def test_promoter_resource_key_is_configurable(tmp_path, defs_dir):
 
     assert result.success
     assert len(calls) == 1
+
+
+def test_landing_check_disabled_by_default_leaves_promoted_meta_untouched(tmp_path, defs_dir):
+    """`landing_check` is off unless explicitly configured -- promoted YAML must stay
+    byte-identical to today's output (no injected `meta.dagster_cube_dbt`) for anyone not
+    opting into this feature.
+    """
+    output_dir = tmp_path / "cubes"
+    component = _make_component(defs_dir)
+    state_path = tmp_path / "state"
+    component.write_state_to_path(state_path)
+
+    context = dg.ComponentTree.for_test().load_context
+    promoter = LocalFileCubeFilePromoter(output_dir=str(output_dir))
+    defs = _with_promoter(component.build_defs_from_state(context, state_path), promoter)
+
+    result = defs.resolve_implicit_global_asset_job_def().execute_in_process(
+        asset_selection=[component.asset_key_for_cube("journey_samples")]
+    )
+
+    assert result.success
+    cube = next(c for c in read_entities(output_dir, "cubes") if c["name"] == "journey_samples")
+    assert LANDING_CHECK_META_KEY not in (cube.get("meta") or {})
+
+
+def test_landing_check_stamps_code_version_and_polls_until_it_matches(tmp_path, defs_dir):
+    """When `landing_check` is configured: the promoted YAML for a selected cube carries the
+    same `code_version` Dagster computed for that asset, stamped into
+    `meta.dagster_cube_dbt.code_version`; and the run doesn't complete until a poll of the
+    (fake) Cube REST API actually echoes that value back -- exercised here with a client that
+    returns a stale/missing value on its first call and the matching one on its second, so a
+    single-poll implementation would fail this test.
+    """
+    output_dir = tmp_path / "cubes"
+    component = _make_component(
+        defs_dir, landing_check=CubeLandingCheck(timeout_seconds=5.0, poll_interval_seconds=0.01)
+    )
+    state_path = tmp_path / "state"
+    component.write_state_to_path(state_path)
+
+    context = dg.ComponentTree.for_test().load_context
+    built_defs = component.build_defs_from_state(context, state_path)
+
+    # Read back the actual AssetSpec's code_version straight off the built (not yet
+    # resource-resolved) AssetsDefinition, rather than recomputing it by hand, so this test
+    # can't silently drift from how the component itself computes it. Deliberately not
+    # `defs.resolve_asset_graph()` here -- that fully resolves the repository, which eagerly
+    # validates every op's required resources are bound, before `cube_api_client` has been
+    # merged in below.
+    cube_key = component.asset_key_for_cube("journey_samples")
+    cubes_assets_def = next(
+        a for a in built_defs.assets if isinstance(a, dg.AssetsDefinition) and cube_key in a.keys
+    )
+    expected_code_version = cubes_assets_def.get_asset_spec(cube_key).code_version
+
+    promoter = LocalFileCubeFilePromoter(output_dir=str(output_dir))
+    client = _scripted_cube_api_client(
+        [
+            {"cubes": [{"name": "journey_samples", "meta": {}}]},  # not landed yet
+            {
+                "cubes": [
+                    {
+                        "name": "journey_samples",
+                        "meta": {LANDING_CHECK_META_KEY: {"code_version": expected_code_version}},
+                    }
+                ]
+            },
+        ]
+    )
+    defs = dg.Definitions.merge(
+        built_defs,
+        dg.Definitions(resources={"cube_file_promoter": promoter, "cube_api_client": client}),
+    )
+
+    result = defs.resolve_implicit_global_asset_job_def().execute_in_process(
+        asset_selection=[component.asset_key_for_cube("journey_samples")]
+    )
+
+    assert result.success
+    cube = next(c for c in read_entities(output_dir, "cubes") if c["name"] == "journey_samples")
+    assert cube["meta"][LANDING_CHECK_META_KEY]["code_version"] == expected_code_version
+
+
+def test_landing_check_timeout_fails_the_run_with_no_materializations(tmp_path, defs_dir):
+    """If Cube never echoes the expected code_version before the configured timeout, the run
+    must fail outright (no `MaterializeResult`), not silently report success -- matching the
+    same contract a promoter failure already has. The unmaterialized asset's `code_version`
+    stays stale, so the next automation evaluation just retries the whole cycle.
+    """
+    component = _make_component(
+        defs_dir, landing_check=CubeLandingCheck(timeout_seconds=0.05, poll_interval_seconds=0.01)
+    )
+    state_path = tmp_path / "state"
+    component.write_state_to_path(state_path)
+
+    context = dg.ComponentTree.for_test().load_context
+    defs = _with_promoter(component.build_defs_from_state(context, state_path), NoopCubeFilePromoter())
+    client = _scripted_cube_api_client([{"cubes": []}])  # never contains the expected cube
+    defs = dg.Definitions.merge(defs, dg.Definitions(resources={"cube_api_client": client}))
+
+    result = defs.resolve_implicit_global_asset_job_def().execute_in_process(
+        asset_selection=[component.asset_key_for_cube("journey_samples")],
+        raise_on_error=False,
+    )
+
+    assert not result.success
+    assert result.asset_materializations_for_node(f"{component.dbt_project.name}_cubes") == []
 
 
 def _cube_multi_asset_op(defs: dg.Definitions, dbt_project_name: str) -> dg.OpDefinition:

@@ -22,3 +22,15 @@ narrative usage docs (dbt conventions, merge patches, promotion resources, etc).
 ## `GitCubeFilePromoter`
 
 ::: dagster_cube_dbt.GitCubeFilePromoter
+
+## `CubeLandingCheck`
+
+::: dagster_cube_dbt.CubeLandingCheck
+
+## `CubeApiClient`
+
+::: dagster_cube_dbt.CubeApiClient
+
+## `CubeRestApiClient`
+
+::: dagster_cube_dbt.CubeRestApiClient

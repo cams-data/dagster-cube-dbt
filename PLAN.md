@@ -10,7 +10,12 @@ to rename cube keys (Phase 37 -- surfaced by fixing Phase 36, itself a real regr
 before merge). A third bug, found via real usage rather than deployment: `GENERATED_ASSET_
 AUTOMATION_CONDITION`'s `code_version_changed()` branch had no deps-readiness gate, so editing
 a cube's own definition before its backing dbt model had ever run fired a request against a
-table that didn't exist yet (Phase 38). 98 tests passing throughout: `python_modules/dagster-cube-dbt/tests/`,
+table that didn't exist yet (Phase 38). A new opt-in feature, `landing_check` (Phase 39): after
+promotion, optionally poll Cube's own REST API until the promoted content is actually visible
+there before considering a cube/view materialized, closing the gap where "materialized" only
+meant "handed to the promoter." Scoped ahead of the planned Superset dataset sync
+(`SUPERSET_SYNC_PLAN.md`), which depends on this to avoid its own propagation-lag risk. 107
+tests passing throughout: `python_modules/dagster-cube-dbt/tests/`,
 run against both dbt-core and dbt Fusion — see Stage 5/8/9/10/11/12/13/14/15/16/17/18/19/20/21/22 and DECISIONS.md.
 Stage 1's fixture ended up in two forms — a library-internal one (`tests/fixtures/dbt_project`,
 used directly by the test suite) and a separate `dg`-runnable example project
