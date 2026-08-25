@@ -2571,3 +2571,86 @@ against a table that doesn't exist yet.
   fail (`1 == 0` at the tick where the definition changes, before the model has materialized --
   the exact bug the user reported), restored the fix, watched it pass.
 - Full suite: **98/98 passed** (97 + this new regression test).
+
+## Phase 39 -- `landing_check`: an optional post-promotion poll against Cube's own REST API
+
+Scoped ahead of the planned Superset sync work (see `SUPERSET_SYNC_PLAN.md`) after the user
+flagged a real gap: `promoter.promote()` returning success only means the generated cube/view
+YAML was *handed off* -- whether a running Cube instance has actually picked it up (hot-reload,
+Cube Cloud propagation, ...) is invisible to Dagster. A cube/view asset can show as
+materialized in Dagster while still not being queryable in Cube yet. The user's own proposed
+mechanism -- stamp each cube/view's `code_version` into its own metadata before promotion, then
+poll Cube's API until it echoes that value back -- is exactly what got built, after verifying
+two things against Cube's actual docs rather than assuming them:
+
+- `GET /v1/meta` echoes a cube/view's custom `meta:` block verbatim (confirmed against Cube's
+  REST API reference; also cross-checked a since-closed GitHub issue, `cube-js/cube#7740`,
+  reporting this was *missing* in an older Cube version -- current docs show it present, but
+  this means the feature has an implicit minimum-Cube-version assumption worth documenting, not
+  something to treat as universally true).
+- Cube's REST API auth is a bare token in the `Authorization` header, **not** a `Bearer <token>`
+  scheme (confirmed via Cube's own auth docs and a GitHub issue discussing exactly this
+  difference from convention) -- typically a JWT signed with `CUBEJS_API_SECRET`. The resource
+  accepts a pre-built token string rather than signing one itself, deliberately: security-context
+  claims requirements vary per deployment, and guessing a claims shape would repeat the same
+  mistake this project has already been burned by twice (Phases 36-37) -- depending on assumed
+  behavior instead of a documented, stable contract.
+
+### Decisions
+
+- `meta.dagster_cube_dbt.code_version` is the injection point -- namespaced to avoid colliding
+  with whatever a user already put in a cube's `meta` via `meta.cube.meta` (an existing,
+  pre-Phase-39 pass-through), merged in rather than overwritten (`with_landing_check_meta`).
+- The stamped value is `AssetSpec.code_version` itself (already computed once, via
+  `_code_version`, for each cube/view's `AssetSpec`) -- not a fresh hash of the raw
+  promoted-YAML dict. Those two would actually differ: the `AssetSpec`'s hash is computed over
+  the `extends`-*resolved* dict (so an ancestor's field change still bumps a child's
+  `code_version`, per Phase 18/Phase 37's design), while the promoted YAML keeps `extends:`
+  literal for Cube to resolve itself. Using the same value Dagster already shows for that
+  asset's `code_version` means what Cube's meta panel displays and what Dagster's UI displays
+  are always the same number -- one canonical source of truth, not two hashes of different
+  content that happen to usually agree.
+- Off by default (`landing_check: CubeLandingCheck | None = None`) -- it needs Cube API
+  credentials and adds latency to every promotion, and plenty of deployments don't need it.
+  When unset, promoted YAML is byte-identical to pre-Phase-39 output (verified by a dedicated
+  regression test) -- no injected `meta.dagster_cube_dbt` key at all, not even an empty one.
+- Polling is scoped to the assets *actually selected* for the run, not every generated
+  cube/view (`promoter.promote` itself still ships the full generated set, unchanged) -- matches
+  what the op yields `MaterializeResult`s for.
+- On timeout: fails the run outright (`dg.Failure`, raised before any `MaterializeResult` is
+  yielded -- the same contract `CubeFilePromoter.promote` already documents for its own
+  failures), naming exactly which cube(s)/view(s) never landed. Rejected logging a warning and
+  materializing anyway -- that would silently reintroduce the exact problem this feature exists
+  to close. Since a failed run leaves the asset's `code_version` unchanged, the next automation
+  evaluation just retries the whole promote-then-poll cycle -- no special retry bookkeeping
+  needed, `code_version_changed()`'s own persistence (Phase 38) already covers it.
+- `requests` is now a base (not optional-extra) dependency -- unlike the still-hypothetical
+  Superset integration, every user of this library already necessarily talks to a Cube
+  deployment, so gating basic HTTP access to *that same* deployment behind an extra buys
+  little. Confirmed via `uv.lock` that this added zero new packages -- `requests` was already
+  present transitively (through `dagster`/`dagster-dbt`), just not previously a direct
+  dependency.
+- `CubeApiClient` is an abstract base (like `CubeFilePromoter`) with `CubeRestApiClient` as the
+  one concrete implementation, rather than a single concrete class -- keeps a seam for a test
+  double (`fetch_meta` is trivial to fake) and for a future non-REST way of checking Cube's
+  state, without committing to needing one yet.
+
+### Verification
+
+- New `tests/test_landing_check.py` (6 tests): `with_landing_check_meta`'s merge-not-overwrite
+  behavior (including on an entity with no prior `meta`), `CubeRestApiClient.fetch_meta`'s
+  request shape (bare token header, trailing-slash-stripped URL) against a mocked
+  `requests.get`, and `wait_for_landing`'s polling loop (returns once all entities match;
+  raises `dg.Failure` naming only the still-pending ones on timeout).
+- New tests in `test_component_integration.py`: `test_landing_check_disabled_by_default_...`
+  (promoted YAML has no injected key when the feature is off), `test_landing_check_stamps_...`
+  (promoted YAML carries the exact `AssetSpec.code_version`; a fake `CubeApiClient` returning a
+  stale value on its first call and the matching one on its second proves this isn't a
+  single-poll implementation), `test_landing_check_timeout_fails_the_run_...` (no
+  `MaterializeResult` on timeout).
+- Confirmed both integration tests actually catch real bugs, the same way as every prior phase:
+  temporarily disabled the meta-injection branch alone (`test_landing_check_stamps_...` failed,
+  `test_landing_check_disabled_by_default_...` still correctly passed -- proving it isn't just
+  testing "the feature is off"), restored it, then temporarily disabled the polling branch alone
+  (`test_landing_check_timeout_...` failed as expected), restored it.
+- Full suite: **107/107 passed** (98 + 3 integration + 6 unit).

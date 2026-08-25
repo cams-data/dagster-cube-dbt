@@ -23,6 +23,7 @@ from dagster_dbt.dbt_manifest import validate_manifest
 from dagster_dbt.utils import ASSET_RESOURCE_TYPES
 
 from dagster_cube_dbt.generation import generate_cubes
+from dagster_cube_dbt.landing_check import wait_for_landing, with_landing_check_meta
 from dagster_cube_dbt.merge import discover_patch_files, merge_documents, resolve_extends
 from dagster_cube_dbt.output import write_entities
 
@@ -62,6 +63,37 @@ class CubeSelect(dg.Resolvable):
         list[str],
         Resolver.default(description="Only include models with one of these exact names."),
     ] = field(default_factory=list)
+
+
+@dataclass
+class CubeLandingCheck(dg.Resolvable):
+    """Optional post-promotion step (off by default -- set this to turn it on): after
+    `CubeFilePromoter.promote` returns, poll Cube's own REST API until every cube/view
+    selected for this run is actually visible there, before considering it materialized. See
+    `dagster_cube_dbt.landing_check` for the full rationale and the API contract this assumes.
+    Requires a `CubeApiClient` (e.g. `CubeRestApiClient`, needing a Cube deployment URL and API
+    token) bound under `resource_key`.
+    """
+
+    resource_key: Annotated[
+        str,
+        Resolver.default(
+            description="Resource key of the `CubeApiClient` this poll is issued through -- "
+            "bound like any other Dagster resource, doesn't need to be declared in this "
+            "defs.yaml.",
+        ),
+    ] = field(default="cube_api_client", kw_only=True)
+    timeout_seconds: Annotated[
+        float,
+        Resolver.default(
+            description="How long to keep polling before failing the run with a clear "
+            "timeout error, naming whichever cube(s)/view(s) never landed.",
+        ),
+    ] = field(default=60.0, kw_only=True)
+    poll_interval_seconds: Annotated[
+        float,
+        Resolver.default(description="Delay between polls of Cube's `/meta` endpoint."),
+    ] = field(default=2.0, kw_only=True)
 
 
 def _yaml_text(entity: Mapping[str, Any]) -> str:
@@ -244,6 +276,14 @@ class CubeDbtProjectComponent(DbtProjectComponent):
     library for local development, where the Dagster process and the Cube process share a
     filesystem; beyond local dev, implement your own `CubeFilePromoter`.
 
+    By default, a cube/view asset is considered materialized as soon as `promoter.promote`
+    returns -- which only means the generated YAML was *handed off*, not that a running Cube
+    instance has actually picked it up yet (hot-reload/propagation lag varies by deployment).
+    Set `landing_check` (a `CubeLandingCheck`) to poll Cube's own REST API after promotion and
+    block materialization until the freshly promoted content is actually visible there; see
+    `dagster_cube_dbt.landing_check` for the full mechanism. Off by default -- it needs Cube API
+    credentials and adds latency to every promotion.
+
     The cube/view multi-asset's op is assigned a Dagster concurrency `pool` (`promotion_pool`,
     defaulted to a name scoped to this project) so a max concurrency of 1 can be set for it in
     the Dagster UI (Deployment > Concurrency) without any code change -- most `CubeFilePromoter`
@@ -292,6 +332,14 @@ class CubeDbtProjectComponent(DbtProjectComponent):
             "shared external state (a git checkout, a fixed output directory, ...) that isn't "
             "safe for two runs to touch at once. Set explicitly to share one pool across "
             "multiple components (e.g. if they're bound to the same promoter/destination).",
+        ),
+    ] = field(default=None, kw_only=True)
+    landing_check: Annotated[
+        CubeLandingCheck | None,
+        Resolver.default(
+            description="Optional post-promotion step: poll Cube's own REST API until "
+            "promoted content actually lands there before considering a cube/view "
+            "materialized. Off by default. See `CubeLandingCheck` for details.",
         ),
     ] = field(default=None, kw_only=True)
 
@@ -399,21 +447,56 @@ class CubeDbtProjectComponent(DbtProjectComponent):
         specs = [self._cube_asset_spec_by_name(name) for name in augmented_cubes_by_name]
         specs += [self.get_view_asset_spec(view) for view in views]
 
+        # A cube/view's own name is always its asset key's last path segment
+        # (asset_key_for_cube/asset_key_for_view), regardless of any subclass renaming the
+        # rest of the key -- so this lookup (used below to stamp/poll for the *same*
+        # code_version Dagster already computed for each asset) stays correct even under a
+        # key-renaming override.
+        code_version_by_name = {spec.key.path[-1]: spec.code_version for spec in specs}
+
+        landing_check = self.landing_check
+        required_resource_keys = {self.promoter_resource_key}
+        if landing_check is not None:
+            required_resource_keys.add(landing_check.resource_key)
+
         @dg.multi_asset(
             specs=specs,
             name=f"{state_aware_project.name}_cubes",
             can_subset=True,
-            required_resource_keys={self.promoter_resource_key},
+            required_resource_keys=required_resource_keys,
             pool=self.promotion_pool or f"{state_aware_project.name}_cube_promotion",
         )
         def _cube_assets(context: dg.AssetExecutionContext):
             promoter = getattr(context.resources, self.promoter_resource_key)
+            # Only stamped when a landing check is actually configured -- keeps promoted YAML
+            # byte-identical to today's output for anyone not opting into this feature.
+            if landing_check is not None:
+                cubes_for_promotion = [
+                    with_landing_check_meta(cube, code_version_by_name[cube["name"]]) for cube in cubes
+                ]
+                views_for_promotion = [
+                    with_landing_check_meta(view, code_version_by_name[view["name"]]) for view in views
+                ]
+            else:
+                cubes_for_promotion, views_for_promotion = cubes, views
             with tempfile.TemporaryDirectory() as tmp_dir:
                 cubes_dir = Path(tmp_dir) / "cubes"
                 views_dir = Path(tmp_dir) / "views"
-                write_entities(cubes_dir, "cubes", cubes)
-                write_entities(views_dir, "views", views)
+                write_entities(cubes_dir, "cubes", cubes_for_promotion)
+                write_entities(views_dir, "views", views_for_promotion)
                 promoter.promote(context, cubes_dir, views_dir)
+
+            if landing_check is not None:
+                expected = {
+                    spec.key.path[-1]: spec.code_version
+                    for spec in specs
+                    if spec.key in context.selected_asset_keys
+                }
+                client = getattr(context.resources, landing_check.resource_key)
+                wait_for_landing(
+                    client, expected, landing_check.timeout_seconds, landing_check.poll_interval_seconds
+                )
+
             # Multi-assets must yield in topological order. Cube specs always precede view
             # specs in `specs` (views can only depend on cubes, never the reverse), so
             # filtering that order down to what's selected -- rather than iterating
