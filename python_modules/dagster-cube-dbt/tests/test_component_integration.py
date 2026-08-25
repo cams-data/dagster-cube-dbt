@@ -505,6 +505,70 @@ def test_get_cube_asset_spec_override_renaming_the_key_is_reflected_in_extends_d
     assert asset_graph.get(child_renamed_key).parent_keys == {parent_renamed_key}
 
 
+def test_landing_check_works_when_a_subclass_renames_the_keys_last_path_segment(tmp_path, defs_dir):
+    """Regression test for a real bug found in production: `landing_check`'s code_version
+    lookups were keyed off `spec.key.path[-1]`, on the assumption a subclass renaming a cube's
+    key would only ever prepend to it, leaving the *last* segment as the cube's own name. A
+    real override (`key=AssetKey(["cube", group, f"{name}_cube"])`, reported by a user) breaks
+    that assumption outright -- the last segment is `f"{name}_cube"`, not `name` -- which raised
+    a bare `KeyError` inside the promotion op. The lookup must instead go by the cube's own
+    `name` field, independent of whatever key shape a subclass computes.
+    """
+    output_dir = tmp_path / "cubes"
+
+    class RenamingComponent(CubeDbtProjectComponent):
+        def get_cube_asset_spec(self, cube):
+            base_spec = super().get_cube_asset_spec(cube)
+            return base_spec.replace_attributes(key=dg.AssetKey(f"{cube['name']}_cube"))
+
+    project = DbtProject(project_dir=FIXTURE_DBT_PROJECT, target=DBT_TARGET)
+    component = RenamingComponent(
+        project=project,
+        cube_select=CubeSelect(paths=["marts"]),
+        landing_check=CubeLandingCheck(timeout_seconds=5.0, poll_interval_seconds=0.01),
+    )
+    component._defs_dir = defs_dir
+    state_path = tmp_path / "state"
+    component.write_state_to_path(state_path)
+
+    context = dg.ComponentTree.for_test().load_context
+    built_defs = component.build_defs_from_state(context, state_path)
+
+    renamed_key = dg.AssetKey("journey_samples_cube")
+    cubes_assets_def = next(
+        a for a in built_defs.assets if isinstance(a, dg.AssetsDefinition) and renamed_key in a.keys
+    )
+    expected_code_version = cubes_assets_def.get_asset_spec(renamed_key).code_version
+
+    promoter = LocalFileCubeFilePromoter(output_dir=str(output_dir))
+    client = _scripted_cube_api_client(
+        [
+            {
+                "cubes": [
+                    {
+                        # Cube itself only ever knows the entity by its own generated name --
+                        # never the Dagster-side renamed key.
+                        "name": "journey_samples",
+                        "meta": {LANDING_CHECK_META_KEY: {"code_version": expected_code_version}},
+                    }
+                ]
+            }
+        ]
+    )
+    defs = dg.Definitions.merge(
+        built_defs,
+        dg.Definitions(resources={"cube_file_promoter": promoter, "cube_api_client": client}),
+    )
+
+    result = defs.resolve_implicit_global_asset_job_def().execute_in_process(
+        asset_selection=[renamed_key]
+    )
+
+    assert result.success
+    cube = next(c for c in read_entities(output_dir, "cubes") if c["name"] == "journey_samples")
+    assert cube["meta"][LANDING_CHECK_META_KEY]["code_version"] == expected_code_version
+
+
 def test_get_cube_asset_spec_resolves_dbt_model_dependency_after_a_rename(tmp_path, defs_dir):
     """A cube renamed via `meta.cube.name`/`suffix` (unit-tested directly against
     `generate_cubes` in test_generation.py) no longer shares its dbt model's name --
