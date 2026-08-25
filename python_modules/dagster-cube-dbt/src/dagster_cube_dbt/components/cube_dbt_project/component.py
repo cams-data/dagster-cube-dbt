@@ -444,15 +444,30 @@ class CubeDbtProjectComponent(DbtProjectComponent):
         # consistently everywhere the cube is referenced, not just to its own top-level spec.
         self._cube_dicts_by_name = augmented_cubes_by_name
         self._cube_spec_cache: dict[str, dg.AssetSpec] = {}
-        specs = [self._cube_asset_spec_by_name(name) for name in augmented_cubes_by_name]
-        specs += [self.get_view_asset_spec(view) for view in views]
+        cube_names = list(augmented_cubes_by_name)
+        cube_specs = [self._cube_asset_spec_by_name(name) for name in cube_names]
+        view_specs = [self.get_view_asset_spec(view) for view in views]
+        specs = cube_specs + view_specs
 
-        # A cube/view's own name is always its asset key's last path segment
-        # (asset_key_for_cube/asset_key_for_view), regardless of any subclass renaming the
-        # rest of the key -- so this lookup (used below to stamp/poll for the *same*
-        # code_version Dagster already computed for each asset) stays correct even under a
-        # key-renaming override.
-        code_version_by_name = {spec.key.path[-1]: spec.code_version for spec in specs}
+        # Paired positionally with `cube_names`/`views` -- not derived from `spec.key` (e.g.
+        # `spec.key.path[-1]`) -- because a subclass overriding `get_cube_asset_spec`/
+        # `get_view_asset_spec` to rename the key is free to make the *last* path segment
+        # something other than the cube/view's own name too (`["cube", group, f"{name}_cube"]`
+        # is a real example that broke this the first time it was written), not just prepend
+        # to it. This lookup (used below to stamp/poll for the *same* code_version Dagster
+        # already computed for each asset) has to go by the entities' own `name` field, which
+        # no override can change without also changing `cubes`/`views` themselves.
+        code_version_by_name = {
+            **dict(zip(cube_names, (spec.code_version for spec in cube_specs))),
+            **{view["name"]: spec.code_version for view, spec in zip(views, view_specs)},
+        }
+        # Same reasoning, the other direction -- recovering an entity's own `name` from a
+        # *selected* `AssetSpec.key` (context.selected_asset_keys only has keys, not names)
+        # without assuming anything about what a subclass's renamed key looks like.
+        name_by_key = {
+            **{spec.key: name for name, spec in zip(cube_names, cube_specs)},
+            **{spec.key: view["name"] for view, spec in zip(views, view_specs)},
+        }
 
         landing_check = self.landing_check
         required_resource_keys = {self.promoter_resource_key}
@@ -488,7 +503,7 @@ class CubeDbtProjectComponent(DbtProjectComponent):
 
             if landing_check is not None:
                 expected = {
-                    spec.key.path[-1]: spec.code_version
+                    name_by_key[spec.key]: spec.code_version
                     for spec in specs
                     if spec.key in context.selected_asset_keys
                 }

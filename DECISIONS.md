@@ -2654,3 +2654,58 @@ two things against Cube's actual docs rather than assuming them:
   testing "the feature is off"), restored it, then temporarily disabled the polling branch alone
   (`test_landing_check_timeout_...` failed as expected), restored it.
 - Full suite: **107/107 passed** (98 + 3 integration + 6 unit).
+
+## Phase 40 -- `landing_check` broke under a subclass renaming the last key path segment (real production bug, first real usage of the feature)
+
+Found immediately on the first real deployment of Phase 39's `landing_check`, via the same
+production project (`nz-data-exploration/dagster-nz-gov-elt`) that surfaced Phases 36 and 37:
+`KeyError: 'geographic_areas'` inside `_cube_assets`, at
+`code_version_by_name[cube["name"]]`. The user's `CustomDbtProjectComponent.get_cube_asset_spec`
+override computes a wholly new key from a `group`/`name` pair --
+`dg.AssetKey(["cube", group, f"{name}_cube"])` -- rather than prepending to the default key the
+way every prior test's renaming override did (Phase 37's `RenamingComponent`:
+`AssetKey(["renamed", *base_spec.key.path])`).
+
+Phase 39's `code_version_by_name` was built as `{spec.key.path[-1]: spec.code_version for spec
+in specs}`, on the documented assumption that "a cube/view's own name is always its asset key's
+last path segment... regardless of any subclass renaming the rest of the key." That assumption
+is simply false for this (entirely reasonable) override shape: the last segment is
+`f"{name}_cube"`, not `name`, so the lookup at `code_version_by_name[cube["name"]]` (using the
+cube dict's real, un-renamed `name` field) never finds a matching key. The equivalent `expected
+= {spec.key.path[-1]: spec.code_version for spec in specs if ...}` used for polling had the
+identical bug one level down -- it would have built an `expected` dict keyed by
+`"geographic_areas_cube"`, which would never match Cube's own `/v1/meta` response (Cube only
+ever knows the entity by its real `name`, `"geographic_areas"`), so even past the `KeyError` the
+polling step would have silently timed out on every run for a project using this override shape.
+
+This is the exact class of mistake [[feedback_override_safe_deps]] already documents from
+Phase 37 -- reintroduced in brand new code within the same session that memory was written,
+because the new code derived an entity's identity by *parsing a subclass-computed value*
+(`spec.key`) instead of carrying the real identity (the cube/view dict's own `name` field)
+through directly. Phase 37's fix pattern (resolve dependency keys by recursively calling the
+same overridable method) doesn't directly apply here -- this isn't a dependency-key lookup, it's
+matching a Dagster `AssetSpec` back to the raw generated dict it came from -- but the underlying
+principle is the same: never assume a shape or invariant about a value a subclass override is
+free to change.
+
+### Decisions
+
+- `code_version_by_name` and its inverse, `name_by_key` (`AssetKey -> name`, needed to recover
+  a selected entity's real name from `context.selected_asset_keys`, which only has keys), are
+  now built by **positional pairing** with `cube_names`/`views` -- `cube_specs = [self.
+  _cube_asset_spec_by_name(name) for name in cube_names]` and `view_specs = [self.
+  get_view_asset_spec(view) for view in views]` are each built in the same order as their
+  corresponding name list, then zipped together. Neither dict is ever built by inspecting
+  `spec.key` to guess an entity's name -- the real `name` always comes from the cube/view dict
+  itself, which no key-renaming override can touch without also changing `cubes`/`views`.
+
+### Verification
+
+- New `test_landing_check_works_when_a_subclass_renames_the_keys_last_path_segment`: a
+  `RenamingComponent` whose `get_cube_asset_spec` override matches the user's real pattern
+  (`key=AssetKey(f"{cube['name']}_cube")`), with `landing_check` configured, materializing the
+  renamed cube asset and asserting the promoted YAML's stamped `code_version` matches the
+  `AssetSpec`'s.
+- Confirmed the same way as every prior phase: reverted just the fix (kept the new test),
+  watched it reproduce the exact reported `KeyError`, restored the fix, watched it pass.
+- Full suite: **108/108 passed** (107 + this new regression test).

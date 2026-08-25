@@ -14,7 +14,11 @@ table that didn't exist yet (Phase 38). A new opt-in feature, `landing_check` (P
 promotion, optionally poll Cube's own REST API until the promoted content is actually visible
 there before considering a cube/view materialized, closing the gap where "materialized" only
 meant "handed to the promoter." Scoped ahead of the planned Superset dataset sync
-(`SUPERSET_SYNC_PLAN.md`), which depends on this to avoid its own propagation-lag risk. 107
+(`SUPERSET_SYNC_PLAN.md`), which depends on this to avoid its own propagation-lag risk. A fourth
+bug, found on `landing_check`'s first real production deployment: its code_version lookups were
+keyed off a subclass-renamed `AssetSpec.key`'s last path segment, on the (false) assumption a
+renaming override would only ever prepend to the default key -- a real override computing a
+wholly new key broke it with a bare `KeyError` (Phase 40). 108
 tests passing throughout: `python_modules/dagster-cube-dbt/tests/`,
 run against both dbt-core and dbt Fusion — see Stage 5/8/9/10/11/12/13/14/15/16/17/18/19/20/21/22 and DECISIONS.md.
 Stage 1's fixture ended up in two forms — a library-internal one (`tests/fixtures/dbt_project`,
