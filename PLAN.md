@@ -18,7 +18,9 @@ meant "handed to the promoter." Scoped ahead of the planned Superset dataset syn
 bug, found on `landing_check`'s first real production deployment: its code_version lookups were
 keyed off a subclass-renamed `AssetSpec.key`'s last path segment, on the (false) assumption a
 renaming override would only ever prepend to the default key -- a real override computing a
-wholly new key broke it with a bare `KeyError` (Phase 40). 108
+wholly new key broke it with a bare `KeyError` (Phase 40). `CubeRestApiClient` also gained a
+`verify_tls` toggle (default `True`) for deployments behind a self-signed/internal-CA cert
+(Phase 41). 110
 tests passing throughout: `python_modules/dagster-cube-dbt/tests/`,
 run against both dbt-core and dbt Fusion — see Stage 5/8/9/10/11/12/13/14/15/16/17/18/19/20/21/22 and DECISIONS.md.
 Stage 1's fixture ended up in two forms — a library-internal one (`tests/fixtures/dbt_project`,
