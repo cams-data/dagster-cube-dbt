@@ -909,7 +909,30 @@ do (not something CI or an agent can do on your behalf):
    - Environment name: `pypi`
 
 After that, every push to `main`/`next` that contains a releasable commit publishes itself —
-no further manual steps.
+no further manual steps, aside from the release GitHub App setup below (needed once `main`/
+`next` are ruleset-protected).
+
+### Letting the release bot push past branch protection
+
+Once a repository ruleset requiring PRs is active on `main`/`next`, the default
+`GITHUB_TOKEN` the `release` job used to push with is blocked too: it authenticates as
+`github-actions[bot]`, and the ruleset has no way to tell that push apart from an accidental
+direct one. Rather than exempt that generic bot identity outright, or fall back to a personal
+access token (ties the pipeline to one person's account, a long-lived secret, and stops working
+if that account changes), `release.yml` mints a short-lived token from a dedicated GitHub App
+instead -- its own distinct bot identity, explicitly exempted, expiring in about an hour rather
+than sitting in secrets indefinitely. One-time setup, manual (only a maintainer with admin
+access can do this):
+
+1. Create a GitHub App (Settings → Developer settings → GitHub Apps → New GitHub App) with
+   **Contents: Read and write** repository permission (covers both pushing commits and
+   creating GitHub Releases via the API -- no other permission needed) and no webhook.
+2. Install it on this repository only.
+3. Generate a private key for the app (downloads a `.pem` file).
+4. Store the App ID as a repo **variable** named `RELEASE_APP_ID`, and the private key's full
+   contents as a repo **secret** named `RELEASE_APP_PRIVATE_KEY`.
+5. Add the App to the ruleset's bypass list (Settings → Rules → Rulesets → the ruleset
+   targeting `main`/`next` → Bypass list → Apps).
 
 ## Documentation
 
