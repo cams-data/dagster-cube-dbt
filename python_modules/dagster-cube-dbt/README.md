@@ -53,6 +53,7 @@ replacement. On top of all of that, this component adds:
 | `cube_translation` | Optional function to customize the generated `AssetSpec` for each cube or view, analogous to `translation` above but for the cube/view layer. |
 | `promoter_resource_key` | Resource key of the `CubeFilePromoter` this component delegates delivery to. Defaults to `"cube_file_promoter"` — only worth changing if a single project has more than one `CubeDbtProjectComponent`, each needing its own promoter. |
 | `promotion_pool` | Dagster concurrency pool assigned to the cube/view multi-asset's promotion op. Defaults to a name scoped to this project (`f"{dbt_project.name}_cube_promotion"`), so a max concurrency of 1 can be set for it in the Dagster UI (Deployment > Concurrency) with no code change — see [Promoting generated files](#promoting-generated-files-to-your-cube-server) below for why. |
+| `landing_check` | Optional `{resource_key, timeout_seconds, poll_interval_seconds}` config turning on a post-promotion poll against Cube's own REST API — see [Checking a promotion actually landed](#checking-a-promotion-actually-landed-in-cube) below. Off (`None`) by default. |
 
 `cube_select` is independent of the inherited `select`/`exclude`/`selector` attributes:
 those control which dbt models are actually built by `dbt build` (real data movement),
@@ -264,6 +265,68 @@ concurrency of 1 for that pool name in the Dagster UI (Deployment → Concurrenc
 change required. Override `promotion_pool` explicitly only if you want multiple
 `CubeDbtProjectComponent`s that share the same underlying promoter/destination to also share
 one pool, so they're mutually exclusive with *each other* too, not just internally.
+
+## Checking a promotion actually landed in Cube
+
+By default, a cube/view asset is considered materialized as soon as `CubeFilePromoter.promote`
+returns — which only means the generated YAML was *handed off*, not that a running Cube
+instance has actually picked it up yet. Hot-reload/propagation lag varies by deployment (a
+self-hosted Cube watching a mounted volume, `git-sync` polling a repo, Cube Cloud's own build
+pipeline after a git push), and none of that is visible to Dagster by default — a cube/view
+asset can show green in the Dagster UI while the corresponding table still doesn't exist yet in
+Cube's SQL API.
+
+Set `landing_check` to close that gap: after promotion, this component stamps each promoted
+cube/view's own `code_version` into `meta.dagster_cube_dbt.code_version` (merged alongside
+whatever `meta` you've already set — see
+[Setting cube attributes from dbt model meta](#setting-cube-attributes-from-dbt-model-meta) —
+never overwriting it), then polls Cube's `GET /meta` REST endpoint until every cube/view
+selected for that run echoes the matching value back, or fails the run once `timeout_seconds`
+elapses.
+
+```yaml
+# defs.yaml
+type: dagster_cube_dbt.CubeDbtProjectComponent
+attributes:
+  project: "{{ project_root }}/path/to/dbt_project"
+  landing_check:
+    resource_key: cube_api_client   # default; only worth changing with more than one instance
+    timeout_seconds: 60             # default
+    poll_interval_seconds: 2        # default
+```
+
+```python
+# e.g. defs/resources.py
+import dagster as dg
+from dagster_cube_dbt import CubeRestApiClient
+
+@dg.definitions
+def resources():
+    return dg.Definitions(
+        resources={
+            "cube_api_client": CubeRestApiClient(
+                api_url="https://your-deployment.cubecloudapp.dev/cubejs-api/v1",
+                api_token=dg.EnvVar("CUBE_API_TOKEN"),
+            )
+        }
+    )
+```
+
+`api_token` is sent verbatim in the `Authorization` header — Cube's REST API takes a bare
+token there, **not** a `Bearer <token>` scheme — typically a JWT signed with your deployment's
+`CUBEJS_API_SECRET`. Generating/rotating that token, and deciding what security-context claims
+it needs for your deployment's access rules, is left entirely to you; `CubeRestApiClient`
+doesn't sign one itself. Implement `CubeApiClient` directly instead if your setup needs
+something other than a straight `GET {api_url}/meta` call (e.g. a proxy in front of Cube).
+
+Off by default: it needs Cube API credentials and adds latency (at least one HTTP round trip,
+likely several while waiting for Cube to catch up) to every promotion, which not every project
+needs. When off, promoted YAML is byte-identical to what it would be without this feature at
+all — no `meta.dagster_cube_dbt` key is added. On timeout, the run fails outright (naming
+exactly which cube(s)/view(s) never landed) rather than reporting a false materialization, the
+same contract `CubeFilePromoter.promote` itself has — since a failed run leaves the asset's
+`code_version` unchanged, the next automation evaluation just retries the whole
+promote-then-poll cycle.
 
 ## Base generation rules
 
