@@ -53,7 +53,7 @@ replacement. On top of all of that, this component adds:
 | `cube_translation` | Optional function to customize the generated `AssetSpec` for each cube or view, analogous to `translation` above but for the cube/view layer. |
 | `promoter_resource_key` | Resource key of the `CubeFilePromoter` this component delegates delivery to. Defaults to `"cube_file_promoter"` — only worth changing if a single project has more than one `CubeDbtProjectComponent`, each needing its own promoter. |
 | `promotion_pool` | Dagster concurrency pool assigned to the cube/view multi-asset's promotion op. Defaults to a name scoped to this project (`f"{dbt_project.name}_cube_promotion"`), so a max concurrency of 1 can be set for it in the Dagster UI (Deployment > Concurrency) with no code change — see [Promoting generated files](#promoting-generated-files-to-your-cube-server) below for why. |
-| `landing_check` | Optional `{resource_key, timeout_seconds, poll_interval_seconds}` config turning on a post-promotion poll against Cube's own REST API — see [Checking a promotion actually landed](#checking-a-promotion-actually-landed-in-cube) below. Off (`None`) by default. |
+| `landing_check` | Optional `{api_url, api_token, verify_tls, resource_key, timeout_seconds, poll_interval_seconds}` config turning on a post-promotion poll against Cube's own REST API — see [Checking a promotion actually landed](#checking-a-promotion-actually-landed-in-cube) below. Off (`None`) by default. |
 
 `cube_select` is independent of the inherited `select`/`exclude`/`selector` attributes:
 those control which dbt models are actually built by `dbt build` (real data movement),
@@ -284,19 +284,36 @@ never overwriting it), then polls Cube's `GET /meta` REST endpoint until every c
 selected for that run echoes the matching value back, or fails the run once `timeout_seconds`
 elapses.
 
+Two ways to give `landing_check` a `CubeApiClient` to poll through, chosen by whether `api_url`
+is set:
+
 ```yaml
-# defs.yaml
+# defs.yaml -- component-managed (the common case): set api_url/api_token directly and this
+# component builds and owns its own CubeRestApiClient, no separate resource binding needed.
+type: dagster_cube_dbt.CubeDbtProjectComponent
+attributes:
+  project: "{{ project_root }}/path/to/dbt_project"
+  landing_check:
+    api_url: "https://your-deployment.cubecloudapp.dev/cubejs-api/v1"
+    api_token: "{{ env.CUBE_API_TOKEN }}"
+    timeout_seconds: 60             # default
+    poll_interval_seconds: 2        # default
+```
+
+```yaml
+# defs.yaml -- external resource: leave api_url unset and bind a CubeApiClient yourself, for a
+# test double, a non-REST implementation, or one instance shared across multiple components.
 type: dagster_cube_dbt.CubeDbtProjectComponent
 attributes:
   project: "{{ project_root }}/path/to/dbt_project"
   landing_check:
     resource_key: cube_api_client   # default; only worth changing with more than one instance
-    timeout_seconds: 60             # default
-    poll_interval_seconds: 2        # default
+    timeout_seconds: 60
+    poll_interval_seconds: 2
 ```
 
 ```python
-# e.g. defs/resources.py
+# e.g. defs/resources.py -- only needed for the external-resource path above
 import dagster as dg
 from dagster_cube_dbt import CubeRestApiClient
 
@@ -312,19 +329,24 @@ def resources():
     )
 ```
 
+`resource_key` currently still defaults to `"cube_api_client"` for backwards compatibility; a
+future release will remove that default, requiring it to be set explicitly whenever the
+external-resource path is what you actually want.
+
 `api_token` is sent verbatim in the `Authorization` header — Cube's REST API takes a bare
 token there, **not** a `Bearer <token>` scheme — typically a JWT signed with your deployment's
 `CUBEJS_API_SECRET`. Generating/rotating that token, and deciding what security-context claims
 it needs for your deployment's access rules, is left entirely to you; `CubeRestApiClient`
-doesn't sign one itself. Implement `CubeApiClient` directly instead if your setup needs
-something other than a straight `GET {api_url}/meta` call (e.g. a proxy in front of Cube).
+doesn't sign one itself. Implement `CubeApiClient` directly instead (the external-resource path)
+if your setup needs something other than a straight `GET {api_url}/meta` call (e.g. a proxy in
+front of Cube).
 
 `verify_tls` (default `True`) controls certificate verification, passed straight through to
-the underlying `requests.get(..., verify=...)` call. Set it to `False` only for a deployment
-you can't otherwise reach with a valid certificate — a self-hosted instance behind a
-self-signed or internal-CA cert, most often — and treat it with the same caution you would
-`requests`' own `verify=False`: it disables certificate verification entirely for every
-request this resource makes.
+the underlying `requests.get(..., verify=...)` call in the component-managed path. Set it to
+`False` only for a deployment you can't otherwise reach with a valid certificate — a
+self-hosted instance behind a self-signed or internal-CA cert, most often — and treat it with
+the same caution you would `requests`' own `verify=False`: it disables certificate
+verification entirely for every request this resource makes.
 
 Off by default: it needs Cube API credentials and adds latency (at least one HTTP round trip,
 likely several while waiting for Cube to catch up) to every promotion, which not every project
@@ -351,16 +373,34 @@ It's a separate component chained onto a `CubeDbtProjectComponent` via `context.
 so `project:`/`cube_select:`/merge-patch config lives in exactly one `defs.yaml` block, not
 duplicated across two:
 
+Two ways to give this component a `SupersetResource` to sync through, chosen by whether
+`base_url` is set:
+
 ```yaml
-# defs.yaml, e.g. defs/superset_sync/defs.yaml
+# defs.yaml -- component-managed (the common case): set base_url/username/password directly
+# and this component builds and owns its own SupersetResource, no separate resource binding
+# needed.
 type: dagster_cube_dbt.CubeSupersetSyncComponent
 attributes:
   dbt_cube_component: "../dbt_ingest"   # path to the CubeDbtProjectComponent's defs.yaml dir
   database_name: "Cube"                 # default; the Superset database connection's name
+  base_url: "https://superset.example.com"
+  username: "{{ env.SUPERSET_USERNAME }}"
+  password: "{{ env.SUPERSET_PASSWORD }}"
+```
+
+```yaml
+# defs.yaml -- external resource: leave base_url unset and bind a SupersetResource yourself,
+# for a test double, or one instance shared across multiple components.
+type: dagster_cube_dbt.CubeSupersetSyncComponent
+attributes:
+  dbt_cube_component: "../dbt_ingest"
+  database_name: "Cube"
+  superset_resource_key: "superset"    # default; only worth changing with more than one instance
 ```
 
 ```python
-# e.g. defs/resources.py
+# e.g. defs/resources.py -- only needed for the external-resource path above
 import dagster as dg
 from dagster_cube_dbt import SupersetResource
 
@@ -377,11 +417,16 @@ def resources():
     )
 ```
 
+`superset_resource_key` currently still defaults to `"superset"` for backwards compatibility;
+a future release will remove that default, requiring it to be set explicitly whenever the
+external-resource path is what you actually want.
+
 | Attribute | Description |
 |---|---|
 | `dbt_cube_component` | Path to the `CubeDbtProjectComponent`'s `defs.yaml` directory, resolved relative to the defs root. |
-| `database_name` | Name of the Superset database connection pointed at Cube's SQL API. Defaults to `"Cube"`. This component doesn't create that connection — set it up once in Superset yourself, the same way `CubeDbtProjectComponent` assumes a running Cube instance already exists rather than provisioning one. |
-| `superset_resource_key` | Resource key of the `SupersetResource` this component syncs through. Defaults to `"superset"`. |
+| `database_name` | Name of the Superset database connection pointed at Cube's SQL API. Defaults to `"Cube"`. This component doesn't create that connection — set it up once in Superset yourself (see above), the same way `CubeDbtProjectComponent` assumes a running Cube instance already exists rather than provisioning one. |
+| `base_url` / `username` / `password` | Set together to have this component build and own its own `SupersetResource` directly. Leave all unset to fall back to `superset_resource_key` instead. |
+| `superset_resource_key` | Resource key of the `SupersetResource` this component syncs through, when `base_url` is left unset. Defaults to `"superset"`. |
 | `sync_pool` | Dagster concurrency pool assigned to the dataset-sync multi-asset's op. Defaults to a name scoped to `dbt_cube_component` — set a max concurrency of 1 for it in the Dagster UI if two runs syncing the same Superset dataset concurrently turns out to be a problem, mirroring `promotion_pool` above. |
 
 Each dataset asset depends on the corresponding view asset (through the sibling component's own
@@ -393,8 +438,9 @@ every dbt data refresh underneath it.
 `SupersetResource` handles the login/CSRF/find-or-create-dataset/refresh/update-columns flow
 against Superset's own REST API, authenticating once per resource instance rather than once per
 dataset. `password` (like `CubeRestApiClient.api_token`) is a plain `str` config field — bind it
-from wherever your project already manages secrets (`dg.EnvVar(...)`, as above), not a literal
-value in checked-in `defs.yaml`.
+from wherever your project already manages secrets, not a literal value in checked-in
+`defs.yaml`: `{{ env.SOME_VAR }}` templating in the component-managed `defs.yaml` path above, or
+`dg.EnvVar(...)` in the external-resource `resources.py` path.
 
 ## Base generation rules
 

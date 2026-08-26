@@ -8,6 +8,7 @@ resolution (see that method's docstring for why).
 import json
 import shutil
 from pathlib import Path
+from unittest.mock import patch
 
 import dagster as dg
 import pytest
@@ -22,6 +23,7 @@ from dagster_cube_dbt.components.cube_superset_sync.component import (
     _resolve_view_members,
 )
 from dagster_cube_dbt.cube_state import CUBE_STATE_FILENAME
+from dagster_cube_dbt.superset_resource import SupersetResource
 
 FIXTURE_DBT_PROJECT = Path(__file__).parent / "fixtures" / "dbt_project"
 
@@ -229,6 +231,50 @@ def test_multi_asset_op_syncs_each_selected_dataset(tmp_path, defs_dir):
     assert call["schema"] == "public"
     assert call["database_name"] == "Cube"
     assert "count" in call["measure_names"]
+
+
+def test_build_managed_resource_returns_none_without_base_url():
+    assert _make_sync_component().build_managed_resource() is None
+
+
+def test_build_managed_resource_builds_a_superset_resource():
+    resource = _make_sync_component(base_url="https://s.example.com", username="u", password="p").build_managed_resource()
+    assert isinstance(resource, SupersetResource)
+    assert resource.base_url == "https://s.example.com"
+
+
+def test_build_managed_resource_raises_when_username_and_password_missing():
+    with pytest.raises(dg.DagsterInvalidDefinitionError, match="username and password"):
+        _make_sync_component(base_url="https://s.example.com").build_managed_resource()
+
+
+def test_multi_asset_op_uses_the_managed_resource_without_needing_one_externally_bound(tmp_path, defs_dir):
+    """Setting `base_url`/`username`/`password` means the component builds its own
+    `SupersetResource` -- the multi-asset op's `required_resource_keys` must not demand
+    anything bound under `superset_resource_key` in that case, or every project using the
+    managed path would also have to bind a pointless resource under a key nothing reads.
+    """
+    sibling = _make_sibling(defs_dir)
+    state_path = tmp_path / "state"
+    sibling.write_state_to_path(state_path)
+
+    context = dg.ComponentTree.for_test().load_context
+    sync_component = _make_sync_component(base_url="https://s.example.com", username="u", password="p")
+    defs = sync_component.build_defs_from_sibling_state(context, sibling, state_path)
+
+    # No "superset" resource bound at all -- resolving the asset graph must not complain about
+    # a missing resource requirement, proving the op doesn't require one in managed mode.
+    asset_graph = defs.resolve_asset_graph()
+    dataset_key = dg.AssetKey(["superset_dataset", "journeys_overview"])
+    assert dataset_key in asset_graph.get_all_asset_keys()
+
+    calls: list = []
+    with patch.object(SupersetResource, "sync_dataset", lambda self, **kwargs: calls.append(kwargs) or 1):
+        result = dg.materialize(defs.assets, instance=dg.DagsterInstance.ephemeral())
+
+    assert result.success
+    assert len(calls) == 1
+    assert calls[0]["table_name"] == "journeys_overview"
 
 
 def test_dataset_column_schema_metadata_matches_resolve_view_members_output():
