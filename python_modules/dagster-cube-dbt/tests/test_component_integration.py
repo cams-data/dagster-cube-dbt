@@ -22,7 +22,7 @@ from dagster_cube_dbt.components.cube_dbt_project.component import (
     CubeLandingCheck,
     CubeSelect,
 )
-from dagster_cube_dbt.landing_check import LANDING_CHECK_META_KEY, CubeApiClient, CubeRestApiClient
+from dagster_cube_dbt.landing_check import LANDING_CHECK_META_KEY, CubeRestApiClient
 from dagster_cube_dbt.output import read_entities
 from dagster_cube_dbt.resources import CubeFilePromoter, LocalFileCubeFilePromoter
 from dbt_engine import DBT_TARGET
@@ -109,15 +109,16 @@ class NoopCubeFilePromoter(CubeFilePromoter):
         return
 
 
-def _scripted_cube_api_client(responses: list[dict]) -> CubeApiClient:
-    """A `CubeApiClient` test double returning canned `/meta`-shaped responses in order (the
-    last one repeats once exhausted), so `wait_for_landing`'s polling loop can be exercised
-    without a real Cube instance. Call count captured via closure, not an instance attribute --
-    same copy-safety concern `_recording_promoter` documents.
+def _scripted_cube_api_client(responses: list[dict]):
+    """A `fetch_meta`-compatible test double returning canned `/meta`-shaped responses in order
+    (the last one repeats once exhausted), so `wait_for_landing`'s polling loop can be
+    exercised without a real Cube instance. No base class needed -- `wait_for_landing` only
+    ever calls `.fetch_meta()` on whatever it's given. Call count captured via closure, not an
+    instance attribute -- same copy-safety concern `_recording_promoter` documents.
     """
     calls = {"count": 0}
 
-    class _ScriptedCubeApiClient(CubeApiClient):
+    class _ScriptedCubeApiClient:
         def fetch_meta(self) -> dict:
             index = min(calls["count"], len(responses) - 1)
             calls["count"] += 1

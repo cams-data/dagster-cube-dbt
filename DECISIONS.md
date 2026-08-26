@@ -3096,3 +3096,69 @@ on `CubeSupersetSyncComponent`'s component-managed config path too.
   `verify_tls` through to the constructed `SupersetResource`.
 - `mkdocs build --strict` clean.
 - Full suite: **143/143 passed** (140 + 3 new tests).
+
+## Phase 47 -- `landing_check` retries through a failing `/meta` poll instead of failing on the first one; `CubeApiClient` ABC removed
+
+The user reported a real production scenario: a `git-sync`-style sidecar loads a bad cube/view
+file, Cube starts serving `5xx` errors for its own schema until a fix propagates -- and the
+window right after that fix actually lands is exactly when `landing_check`'s poll tends to be
+running. `wait_for_landing` called `client.fetch_meta()` with no exception handling at all, so a
+single transient 500 during that window killed the run outright, defeating the whole point of a
+feature meant to tolerate propagation lag.
+
+### The ABC question
+
+The user then asked a sharper design question: why was `CubeApiClient` an `ABC` at all, given
+`CubeRestApiClient` is the only real implementation? Checked Phase 39's actual stated
+rationale rather than assuming it still held: "keeps a seam for a test double... and for a
+future non-REST way of checking Cube's state, without committing to needing one yet." Both
+turned out weak on inspection -- a test double never needed a formal base class (Python duck
+typing already makes any object with a compatible `fetch_meta` substitutable, and the existing
+tests proved this by construction, not by argument), and "a future non-REST way" is exactly the
+kind of speculative future requirement this project's own conventions say not to design for.
+Contrast with `CubeFilePromoter`, which earns its `ABC`: genuinely multiple real
+implementations (`LocalFileCubeFilePromoter`, `GitCubeFilePromoter`), each needing
+destination-specific runtime credentials no component author could anticipate. `CubeApiClient`
+never had that -- there's only one way to talk to Cube's own REST API. Removed the ABC;
+`CubeRestApiClient` is now a plain concrete `dg.ConfigurableResource`. The external-resource
+path on `CubeLandingCheck` (bind something under `resource_key` instead of `api_url`/
+`api_token`) stays exactly as useful as before -- that design (Phase 44) was never actually
+about the ABC, it was about sharing one resource instance or substituting a test double, both
+still fully supported via duck typing with no formal base class needed.
+
+### The retry fix
+
+Collapsing to one concrete implementation is what actually unlocked doing this properly, as the
+user pointed out: with `wait_for_landing` now able to assume it's always talking to `requests`,
+it can distinguish *why* a poll failed, not just that it did. `requests.HTTPError` with a `5xx`
+status, or the request failing to complete at all (`requests.RequestException` -- connection
+refused, a timeout, Cube mid-restart), is treated the same as "not landed yet" and retried,
+bounded by the existing `timeout_seconds`. A `4xx` response (a bad `api_url`, an invalid/expired
+`api_token`) is a permanent misconfiguration more polling won't fix, so it's re-raised
+immediately instead of only surfacing once the timeout elapses -- this is the precision a
+blanket `except Exception: keep polling` (my own first-pass proposal, before the user's ABC
+question) couldn't offer, since that would have also silently retried a genuine 401 for the
+full timeout window before failing with a message that didn't explain why. The last error seen
+(if any) is included in the eventual timeout `dg.Failure` message, so a *persistent* 5xx/
+connection failure -- distinct from "the content genuinely never landed" -- is still
+diagnosable rather than looking identical to ordinary propagation lag.
+
+### Verification
+
+- Four new tests in `test_landing_check.py`, against a real `CubeRestApiClient` with mocked
+  `requests.get` (not a fake client -- the new logic depends on real `requests` exception/
+  status-code shapes): retries through a `5xx` response and a connection error, each followed
+  by a successful match; fails immediately (asserted both by exception type -- `requests.
+  HTTPError`, not `dg.Failure` -- and by wall-clock time, with a `timeout_seconds`/
+  `poll_interval_seconds` long enough that a retry-then-timeout path would have taken much
+  longer) on a `4xx` response; includes "last error while polling" in the timeout message for a
+  persistent `5xx`.
+- All three retry/last-error tests confirmed to actually catch the regression: temporarily
+  restored the old unconditional `client.fetch_meta()` call (no try/except), watched them fail
+  with the raw `requests.HTTPError`/`ConnectionError` propagating unhandled, restored the fix.
+- `CubeApiClient` removed from `dagster_cube_dbt/__init__.py`'s exports, `docs/reference.md`,
+  and every docstring/README mention; existing scripted-client test doubles
+  (`_client_with_responses`, `_scripted_cube_api_client`) just dropped the now-nonexistent base
+  class -- no other change needed, proving the ABC was never load-bearing for them.
+- `mkdocs build --strict` clean.
+- Full suite: **144/144 passed** (140 + 4 new retry tests).

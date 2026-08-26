@@ -23,12 +23,7 @@ from dagster_dbt.utils import ASSET_RESOURCE_TYPES
 
 from dagster_cube_dbt.cube_state import CUBE_STATE_FILENAME, read_cube_state, write_cube_state
 from dagster_cube_dbt.generation import generate_cubes
-from dagster_cube_dbt.landing_check import (
-    CubeApiClient,
-    CubeRestApiClient,
-    wait_for_landing,
-    with_landing_check_meta,
-)
+from dagster_cube_dbt.landing_check import CubeRestApiClient, wait_for_landing, with_landing_check_meta
 from dagster_cube_dbt.merge import discover_patch_files, merge_documents, resolve_extends
 from dagster_cube_dbt.output import write_entities
 
@@ -76,21 +71,21 @@ class CubeLandingCheck(dg.Resolvable):
     selected for this run is actually visible there, before considering it materialized. See
     `dagster_cube_dbt.landing_check` for the full rationale and the API contract this assumes.
 
-    Needs a `CubeApiClient` to issue that poll through -- two ways to provide one, chosen by
+    Needs a `CubeRestApiClient` to issue that poll through -- two ways to provide one, chosen by
     whether `api_url` is set:
 
     - **Set `api_url` (and `api_token`)** and this component builds and owns a
       `CubeRestApiClient` itself, directly from these attributes -- the common case, since
-      almost every project uses the one real `CubeApiClient` implementation as-is.
-    - **Leave `api_url` unset** and this falls back to looking up a `CubeApiClient` bound under
-      `resource_key` as an ordinary Dagster resource -- for a custom `CubeApiClient` subclass
-      (e.g. a test double, or a non-REST implementation), or one resource instance shared
-      across multiple components. `resource_key` currently still defaults to
-      `"cube_api_client"` for backwards compatibility; a future release will remove that
-      default, requiring `resource_key` to be set explicitly whenever this external-resource
-      path is what you actually want, so an incomplete `api_url`-less, `resource_key`-less
-      config is unambiguously reported as *missing configuration* rather than a *missing
-      resource*.
+      there's only one real implementation.
+    - **Leave `api_url` unset** and this falls back to looking up something bound under
+      `resource_key` as an ordinary Dagster resource -- for a test double, or one resource
+      instance shared across multiple components. Nothing needs to formally subclass
+      `CubeRestApiClient` for this; any object with a compatible `fetch_meta` method works.
+      `resource_key` currently still defaults to `"cube_api_client"` for backwards
+      compatibility; a future release will remove that default, requiring `resource_key` to be
+      set explicitly whenever this external-resource path is what you actually want, so an
+      incomplete `api_url`-less, `resource_key`-less config is unambiguously reported as
+      *missing configuration* rather than a *missing resource*.
     """
 
     api_url: Annotated[
@@ -98,7 +93,7 @@ class CubeLandingCheck(dg.Resolvable):
         Resolver.default(
             description="Cube deployment's REST API base URL. Setting this (with api_token) "
             "means this component builds and owns its own CubeRestApiClient directly, instead "
-            "of looking up a CubeApiClient resource bound under resource_key.",
+            "of looking up a resource bound under resource_key.",
         ),
     ] = field(default=None, kw_only=True)
     api_token: Annotated[
@@ -118,9 +113,10 @@ class CubeLandingCheck(dg.Resolvable):
     resource_key: Annotated[
         str,
         Resolver.default(
-            description="Resource key of the `CubeApiClient` this poll is issued through, "
-            "when api_url is left unset -- bound like any other Dagster resource, doesn't "
-            "need to be declared in this defs.yaml.",
+            description="Resource key of the CubeRestApiClient (or any object with a "
+            "compatible fetch_meta method) this poll is issued through, when api_url is left "
+            "unset -- bound like any other Dagster resource, doesn't need to be declared in "
+            "this defs.yaml.",
         ),
     ] = field(default="cube_api_client", kw_only=True)
     timeout_seconds: Annotated[
@@ -135,7 +131,7 @@ class CubeLandingCheck(dg.Resolvable):
         Resolver.default(description="Delay between polls of Cube's `/meta` endpoint."),
     ] = field(default=2.0, kw_only=True)
 
-    def build_managed_client(self) -> CubeApiClient | None:
+    def build_managed_client(self) -> CubeRestApiClient | None:
         """Returns a `CubeRestApiClient` built directly from `api_url`/`api_token`/`verify_tls`
         if `api_url` is set (the component-managed path), `None` if it's unset (the caller
         should fall back to `resource_key` instead). Raises clearly, rather than deferring to a
@@ -148,9 +144,9 @@ class CubeLandingCheck(dg.Resolvable):
         if self.api_token is None:
             raise dg.DagsterInvalidDefinitionError(
                 "landing_check.api_url is set, which means this component should build and "
-                "manage its own CubeApiClient directly, but landing_check.api_token is "
+                "manage its own CubeRestApiClient directly, but landing_check.api_token is "
                 "missing. Set both api_url and api_token, or remove api_url entirely (and set "
-                "resource_key) to bind an existing CubeApiClient resource externally instead."
+                "resource_key) to bind a resource externally instead."
             )
         return CubeRestApiClient(api_url=self.api_url, api_token=self.api_token, verify_tls=self.verify_tls)
 
