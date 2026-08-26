@@ -3062,3 +3062,37 @@ have been caught by `test_component_integration.py` alone, since nothing there e
   found for loc ...defs/../dbt_cubes".
 - `mkdocs build --strict` clean.
 - Full suite: **140/140 passed** (138 + 2 new regression tests).
+
+## Phase 46 -- `SupersetResource.verify_tls`, mirroring `CubeRestApiClient`'s escape hatch
+
+User-requested, small: the user was "having trouble" with TLS on their Superset deployment and
+asked for the same escape hatch `CubeRestApiClient.verify_tls` (Phase 41) already has, surfaced
+on `CubeSupersetSyncComponent`'s component-managed config path too.
+
+### Decisions
+
+- Named `verify_tls`, not the user's original suggestion `ignore_tls` -- matches
+  `CubeRestApiClient.verify_tls` exactly (same name, same `bool = True` default, same
+  `requests`-`verify=`-passthrough semantics), so a project mixing both resources doesn't have
+  to remember two different names/polarities for the same concept. Flagged this substitution
+  rather than silently doing it.
+- Applied once, on the `requests.Session` itself (`self._session.verify = self.verify_tls`,
+  set at the top of `_ensure_authenticated`, which every `sync_dataset` call already runs
+  first), rather than passed as a `verify=` kwarg on each of the several `self._session.*`
+  calls scattered across the login/CSRF/find/create/refresh/update flow. `requests.Session.verify`
+  applies to every request made through that session unless a call overrides it, so this is
+  both less code and impossible to forget on some future new call site.
+- Surfaced on `CubeSupersetSyncComponent` as a plain `verify_tls: bool = True` field, passed
+  straight through in `build_managed_resource()` -- only meaningful on the component-managed
+  path (`base_url` set); the external-resource path already lets a user set `verify_tls`
+  directly when constructing their own bound `SupersetResource`, same as always.
+
+### Verification
+
+- Two new tests in `test_superset_resource.py`: `verify_tls` defaults to `True` on the session;
+  `verify_tls=False` sets `session.verify = False`. Confirmed via revert-and-confirm-fail
+  (temporarily no-opped the assignment, watched both fail, restored it).
+- One new test in `test_cube_superset_sync_component.py`: `build_managed_resource` passes
+  `verify_tls` through to the constructed `SupersetResource`.
+- `mkdocs build --strict` clean.
+- Full suite: **143/143 passed** (140 + 3 new tests).

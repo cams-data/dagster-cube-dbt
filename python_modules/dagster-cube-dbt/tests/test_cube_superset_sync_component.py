@@ -241,6 +241,14 @@ def test_build_managed_resource_builds_a_superset_resource():
     resource = _make_sync_component(base_url="https://s.example.com", username="u", password="p").build_managed_resource()
     assert isinstance(resource, SupersetResource)
     assert resource.base_url == "https://s.example.com"
+    assert resource.verify_tls is True
+
+
+def test_build_managed_resource_passes_verify_tls_through():
+    resource = _make_sync_component(
+        base_url="https://s.example.com", username="u", password="p", verify_tls=False
+    ).build_managed_resource()
+    assert resource.verify_tls is False
 
 
 def test_build_managed_resource_raises_when_username_and_password_missing():

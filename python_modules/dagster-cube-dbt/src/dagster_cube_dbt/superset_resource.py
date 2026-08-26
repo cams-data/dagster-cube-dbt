@@ -49,11 +49,20 @@ class SupersetResource(dg.ConfigurableResource):
     API) -- `database_name` (passed to `sync_dataset`) must already exist in Superset, set up
     once by hand, the same way `CubeDbtProjectComponent` assumes a running Cube instance already
     exists rather than provisioning one.
+
+    `verify_tls` defaults to `True` (verify the server's certificate, `requests`' own default and
+    the same default `CubeRestApiClient.verify_tls` uses). Set it to `False` only for a
+    deployment you can't otherwise reach with a valid certificate -- a self-hosted instance
+    behind a self-signed or internal-CA cert, most often -- and treat it with the same caution
+    you would `requests`' own `verify=False`: it disables certificate verification entirely for
+    every request this resource makes, for every call in `sync_dataset`'s login/CSRF/find/
+    create/refresh/update flow, not just one of them.
     """
 
     base_url: str
     username: str
     password: str
+    verify_tls: bool = True
     refresh_timeout_seconds: float = 30.0
     refresh_poll_interval_seconds: float = 1.0
 
@@ -64,6 +73,11 @@ class SupersetResource(dg.ConfigurableResource):
         return f"{self.base_url.rstrip('/')}{path}"
 
     def _ensure_authenticated(self) -> None:
+        # Set on the session (applies to every request made through it) rather than passed
+        # per-call -- this resource's login/CSRF/find/create/refresh/update flow is several
+        # requests deep, and a per-call verify= would need repeating (and staying in sync)
+        # everywhere `self._session` is used, not just here.
+        self._session.verify = self.verify_tls
         if self._authenticated:
             return
         login_response = self._session.post(

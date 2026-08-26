@@ -466,6 +466,7 @@ external-resource path is what you actually want.
 | `dbt_cube_component` | Path to the `CubeDbtProjectComponent`'s `defs.yaml` directory, resolved relative to the top-level `defs` directory -- **not** relative to this component's own `defs.yaml` (no leading `../` needed even for a sibling directory). |
 | `database_name` | Name of the Superset database connection pointed at Cube's SQL API. Defaults to `"Cube"`. This component doesn't create that connection — set it up once in Superset yourself (see above), the same way `CubeDbtProjectComponent` assumes a running Cube instance already exists rather than provisioning one. |
 | `base_url` / `username` / `password` | Set together to have this component build and own its own `SupersetResource` directly. Leave all unset to fall back to `superset_resource_key` instead. |
+| `verify_tls` | Passed straight through to the component-managed `SupersetResource`'s own `verify_tls` (only meaningful when `base_url` is set). Defaults to `True`. |
 | `superset_resource_key` | Resource key of the `SupersetResource` this component syncs through, when `base_url` is left unset. Defaults to `"superset"`. |
 | `sync_pool` | Dagster concurrency pool assigned to the dataset-sync multi-asset's op. Defaults to a name scoped to `dbt_cube_component` — set a max concurrency of 1 for it in the Dagster UI if two runs syncing the same Superset dataset concurrently turns out to be a problem, mirroring `promotion_pool` above. |
 
@@ -481,6 +482,13 @@ dataset. `password` (like `CubeRestApiClient.api_token`) is a plain `str` config
 from wherever your project already manages secrets, not a literal value in checked-in
 `defs.yaml`: `{{ env.SOME_VAR }}` templating in the component-managed `defs.yaml` path above, or
 `dg.EnvVar(...)` in the external-resource `resources.py` path.
+
+`verify_tls` (default `True`) controls certificate verification for every request in that
+login/CSRF/find/create/refresh/update flow — the same option, and the same caveat, as
+`CubeRestApiClient.verify_tls`: set it to `False` only for a Superset deployment you can't
+otherwise reach with a valid certificate (self-signed or internal-CA, most often), and treat it
+with the same caution as `requests`' own `verify=False` — it disables certificate verification
+entirely, not just for one call.
 
 ## Base generation rules
 
