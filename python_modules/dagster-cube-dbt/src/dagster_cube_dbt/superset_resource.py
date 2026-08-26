@@ -35,6 +35,19 @@ def _verbose_name(member: Mapping[str, Any]) -> str:
     return str(member["name"]).replace("_", " ").title()
 
 
+def _raise_for_status(response: requests.Response) -> None:
+    """Like `response.raise_for_status()`, but includes the response body in the raised error.
+    Superset's REST API returns a JSON payload explaining *why* a request was rejected (e.g. a
+    400 from dataset creation names the actual validation failure -- table not found, column
+    type mismatch, etc.) -- `raise_for_status()` alone discards that, leaving only the
+    unhelpful status line and making every failure here need a packet capture to diagnose.
+    """
+    try:
+        response.raise_for_status()
+    except requests.HTTPError as error:
+        raise requests.HTTPError(f"{error} -- response body: {response.text}", response=response) from error
+
+
 class SupersetResource(dg.ConfigurableResource):
     """Owns the login/CSRF/session lifecycle for Superset's REST API and the find-or-create
     dataset flow. Authenticates once per resource instance (cached), not once per dataset --
@@ -124,12 +137,12 @@ class SupersetResource(dg.ConfigurableResource):
                     "refresh": True,
                 },
             )
-            login_response.raise_for_status()
+            _raise_for_status(login_response)
             access_token = login_response.json()["access_token"]
             self._session.headers["Authorization"] = f"Bearer {access_token}"
 
         csrf_response = self._session.get(self._url("/api/v1/security/csrf_token/"))
-        csrf_response.raise_for_status()
+        _raise_for_status(csrf_response)
         self._session.headers["X-CSRFToken"] = csrf_response.json()["result"]
         self._authenticated = True
 
@@ -140,7 +153,7 @@ class SupersetResource(dg.ConfigurableResource):
                 "q": json.dumps({"filters": [{"col": "database_name", "opr": "eq", "value": database_name}]})
             },
         )
-        response.raise_for_status()
+        _raise_for_status(response)
         results = response.json()["result"]
         if not results:
             raise dg.Failure(
@@ -165,7 +178,7 @@ class SupersetResource(dg.ConfigurableResource):
                 )
             },
         )
-        response.raise_for_status()
+        _raise_for_status(response)
         results = response.json()["result"]
         return results[0]["id"] if results else None
 
@@ -180,17 +193,17 @@ class SupersetResource(dg.ConfigurableResource):
                 "always_filter_main_dttm": False,
             },
         )
-        response.raise_for_status()
+        _raise_for_status(response)
         return response.json()["id"]
 
     def _refresh_and_fetch_columns(self, dataset_id: int) -> dict[str, Any]:
         refresh_response = self._session.put(self._url(f"/api/v1/dataset/{dataset_id}/refresh"))
-        refresh_response.raise_for_status()
+        _raise_for_status(refresh_response)
 
         deadline = time.monotonic() + self.refresh_timeout_seconds
         while True:
             get_response = self._session.get(self._url(f"/api/v1/dataset/{dataset_id}"))
-            get_response.raise_for_status()
+            _raise_for_status(get_response)
             dataset = get_response.json()["result"]
             if dataset.get("columns") or time.monotonic() >= deadline:
                 return dataset
@@ -258,5 +271,5 @@ class SupersetResource(dg.ConfigurableResource):
             self._url(f"/api/v1/dataset/{dataset_id}"),
             json={"columns": updated_columns, "metrics": list(metrics_by_name.values())},
         )
-        update_response.raise_for_status()
+        _raise_for_status(update_response)
         return dataset_id

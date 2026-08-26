@@ -7,8 +7,9 @@ from unittest.mock import MagicMock
 
 import dagster as dg
 import pytest
+import requests
 
-from dagster_cube_dbt.superset_resource import SupersetResource, _verbose_name
+from dagster_cube_dbt.superset_resource import SupersetResource, _raise_for_status, _verbose_name
 
 
 class _FakeResponse:
@@ -35,6 +36,28 @@ def _resource_with_session(session: MagicMock) -> SupersetResource:
     resource = SupersetResource(base_url="https://superset.example.com", username="u", password="p")
     resource._session = session  # noqa: SLF001 -- swapping in the fake for this test
     return resource
+
+
+def test_raise_for_status_includes_the_response_body_in_the_error():
+    """Regression test: `response.raise_for_status()` alone only reports the status line
+    ("400 Client Error: BAD REQUEST for url: ..."), discarding Superset's own JSON error
+    payload explaining *why* -- a real production report where that made a genuine 400 (a
+    dataset-creation validation failure) undiagnosable without a packet capture.
+    """
+    response = requests.Response()
+    response.status_code = 400
+    response.url = "https://superset.example.com/api/v1/dataset/"
+    response._content = b'{"message": {"table_name": ["Dataset already exists"]}}'
+
+    with pytest.raises(requests.HTTPError, match="Dataset already exists"):
+        _raise_for_status(response)
+
+
+def test_raise_for_status_does_not_raise_for_a_successful_response():
+    response = requests.Response()
+    response.status_code = 200
+
+    _raise_for_status(response)  # must not raise
 
 
 def test_sync_dataset_creates_a_new_dataset_when_none_exists():

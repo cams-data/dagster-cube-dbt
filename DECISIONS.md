@@ -3198,3 +3198,18 @@ The user hit a real `401 Unauthorized` from `POST /api/v1/security/login` on the
 - Three new tests in `test_superset_resource.py`: `api_key` skips the login POST entirely and sets the `Authorization` header directly (confirmed via revert-and-confirm-fail -- temporarily forced the `api_key` branch off, watched the test fail on an unexpected `session.post` call, restored it); constructor raises with neither `api_key` nor `username`/`password` set; constructor raises with both set.
 - Two new tests in `test_cube_superset_sync_component.py`: `build_managed_resource` builds a `SupersetResource` from `api_key` alone (leaving `username`/`password` as `None`); raises when `api_key` and `username`/`password` are both set.
 - Full suite: **152/152 passed** (147 + 5 new tests).
+
+## Phase 50 -- `SupersetResource` requests now surface the response body on failure
+
+The user, past the auth fix from Phase 49, hit a real `400 Client Error: BAD REQUEST for url: .../api/v1/dataset/` from `_create_dataset` -- and the traceback showed nothing beyond that status line. `raise_for_status()` alone never includes the response body, so there was no way to know *why* Superset rejected the request (a duplicate-dataset conflict? a table-not-found from schema introspection? something else?) without a packet capture. Rather than guess, fixed the actual blind spot first.
+
+### Decisions
+
+- Added a module-level `_raise_for_status(response)` helper: calls `response.raise_for_status()`, and on `requests.HTTPError`, re-raises with the response body appended to the message (`f"{error} -- response body: {response.text}"`). Superset's REST API returns a JSON payload describing the actual validation failure on a 400 (and useful detail on most other error codes too), which is exactly the information needed to diagnose this without another round trip.
+- Replaced all eight `response.raise_for_status()` call sites in the login/CSRF/find/create/refresh/update flow with this helper, not just the one that happened to fail in the report -- every one of them can 400/401/403/5xx with a body worth seeing, and leaving seven of the eight silently truncated would just relocate this same problem to the next failure.
+- Didn't guess at the actual root cause of the user's specific 400 (duplicate dataset from a `_find_dataset_id` filter mismatch? table not yet visible to Superset's schema introspection? something else entirely) -- shipped the diagnostic fix first so the next report comes with Superset's own explanation attached, rather than spending a round trip on an unverified guess.
+
+### Verification
+
+- Two new tests in `test_superset_resource.py`, against a real `requests.Response` (not the `_FakeResponse` test double, which stubs `raise_for_status()` as a no-op and only exercises success paths) -- confirmed the JSON body's actual error text lands in the raised message on a 4xx, and that a 2xx response still doesn't raise at all. Confirmed via revert-and-confirm-fail: temporarily reverted `_raise_for_status` to a bare `response.raise_for_status()`, watched the body-surfacing test fail with just the generic status line, restored it.
+- Full suite: **154/154 passed** (152 + 2 new tests).
