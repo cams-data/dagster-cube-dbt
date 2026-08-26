@@ -210,6 +210,13 @@ class CubeSupersetSyncComponent(dg.Component, dg.Resolvable):
             "defs.yaml.",
         ),
     ] = field(default=None, kw_only=True)
+    verify_tls: Annotated[
+        bool,
+        Resolver.default(
+            description="Passed straight through to the component-managed SupersetResource's "
+            "own verify_tls (only meaningful when base_url is set).",
+        ),
+    ] = field(default=True, kw_only=True)
     superset_resource_key: Annotated[
         str,
         Resolver.default(
@@ -247,7 +254,12 @@ class CubeSupersetSyncComponent(dg.Component, dg.Resolvable):
                 "password together, or remove base_url entirely (and set superset_resource_key) "
                 "to bind an existing SupersetResource externally instead."
             )
-        return SupersetResource(base_url=self.base_url, username=self.username, password=self.password)
+        return SupersetResource(
+            base_url=self.base_url,
+            username=self.username,
+            password=self.password,
+            verify_tls=self.verify_tls,
+        )
 
     def build_defs(self, context: dg.ComponentLoadContext) -> dg.Definitions:
         sibling = context.load_component(self.dbt_cube_component, CubeDbtProjectComponent)

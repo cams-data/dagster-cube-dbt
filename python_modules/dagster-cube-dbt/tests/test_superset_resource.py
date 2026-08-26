@@ -124,6 +124,43 @@ def test_sync_dataset_reuses_an_existing_dataset_instead_of_creating_one():
     session.post.assert_called_once()  # login only -- no dataset creation
 
 
+def test_sync_dataset_verify_tls_defaults_to_true_on_the_session():
+    session = MagicMock()
+    session.post.side_effect = [_login_response()]
+    session.get.side_effect = [
+        _csrf_response(),
+        _FakeResponse({"result": [{"id": 7}]}),
+        _FakeResponse({"result": [{"id": 99}]}),
+        _FakeResponse({"result": {"columns": [{"column_name": "amount"}], "metrics": []}}),
+    ]
+    session.put.side_effect = [_FakeResponse({}), _FakeResponse({"result": {}})]
+    resource = _resource_with_session(session)
+
+    resource.sync_dataset("Cube", "public", "orders_overview", [], [])
+
+    assert session.verify is True
+
+
+def test_sync_dataset_verify_tls_false_disables_certificate_verification_on_the_session():
+    session = MagicMock()
+    session.post.side_effect = [_login_response()]
+    session.get.side_effect = [
+        _csrf_response(),
+        _FakeResponse({"result": [{"id": 7}]}),
+        _FakeResponse({"result": [{"id": 99}]}),
+        _FakeResponse({"result": {"columns": [{"column_name": "amount"}], "metrics": []}}),
+    ]
+    session.put.side_effect = [_FakeResponse({}), _FakeResponse({"result": {}})]
+    resource = SupersetResource(
+        base_url="https://superset.example.com", username="u", password="p", verify_tls=False
+    )
+    resource._session = session  # noqa: SLF001
+
+    resource.sync_dataset("Cube", "public", "orders_overview", [], [])
+
+    assert session.verify is False
+
+
 def test_sync_dataset_only_authenticates_once_across_multiple_calls():
     session = MagicMock()
     session.post.side_effect = [_login_response()]
