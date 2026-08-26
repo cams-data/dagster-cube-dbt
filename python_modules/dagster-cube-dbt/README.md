@@ -284,8 +284,8 @@ never overwriting it), then polls Cube's `GET /meta` REST endpoint until every c
 selected for that run echoes the matching value back, or fails the run once `timeout_seconds`
 elapses.
 
-Two ways to give `landing_check` a `CubeApiClient` to poll through, chosen by whether `api_url`
-is set:
+Two ways to give `landing_check` a `CubeRestApiClient` to poll through, chosen by whether
+`api_url` is set:
 
 ```yaml
 # defs.yaml -- component-managed (the common case): set api_url/api_token directly and this
@@ -301,8 +301,9 @@ attributes:
 ```
 
 ```yaml
-# defs.yaml -- external resource: leave api_url unset and bind a CubeApiClient yourself, for a
-# test double, a non-REST implementation, or one instance shared across multiple components.
+# defs.yaml -- external resource: leave api_url unset and bind something yourself under
+# resource_key -- a test double, or one instance shared across multiple components. Nothing
+# needs to formally subclass CubeRestApiClient; any object with a compatible fetch_meta works.
 type: dagster_cube_dbt.CubeDbtProjectComponent
 attributes:
   project: "{{ project_root }}/path/to/dbt_project"
@@ -337,9 +338,19 @@ external-resource path is what you actually want.
 token there, **not** a `Bearer <token>` scheme — typically a JWT signed with your deployment's
 `CUBEJS_API_SECRET`. Generating/rotating that token, and deciding what security-context claims
 it needs for your deployment's access rules, is left entirely to you; `CubeRestApiClient`
-doesn't sign one itself. Implement `CubeApiClient` directly instead (the external-resource path)
-if your setup needs something other than a straight `GET {api_url}/meta` call (e.g. a proxy in
-front of Cube).
+doesn't sign one itself. If your setup needs something other than a straight
+`GET {api_url}/meta` call (e.g. a proxy in front of Cube), bind your own object with a
+compatible `fetch_meta` method under `resource_key` instead (the external-resource path) --
+there's no formal base class to subclass, Python's own duck typing is enough.
+
+`landing_check` also retries through a `/meta` request that fails outright, not just one that
+returns stale content -- a `git-sync`-style sidecar loading a bad cube/view file makes Cube
+start serving `5xx` errors for its *own* schema until a fix propagates, and the window right
+after that fix lands is exactly when this poll tends to be running. A `5xx` response, or the
+request failing to complete at all (connection refused, a timeout), is treated the same as "not
+landed yet" and retried; a `4xx` response (a bad `api_url`, an invalid/expired `api_token`) is
+raised immediately instead of only surfacing once `timeout_seconds` runs out, since that's a
+permanent misconfiguration more polling won't fix.
 
 `verify_tls` (default `True`) controls certificate verification, passed straight through to
 the underlying `requests.get(..., verify=...)` call in the component-managed path. Set it to
