@@ -161,6 +161,35 @@ def test_sync_dataset_verify_tls_false_disables_certificate_verification_on_the_
     assert session.verify is False
 
 
+def test_sync_dataset_with_api_key_skips_the_login_call():
+    session = MagicMock()
+    session.headers = {}
+    session.get.side_effect = [
+        _csrf_response(),
+        _FakeResponse({"result": [{"id": 7}]}),
+        _FakeResponse({"result": [{"id": 99}]}),
+        _FakeResponse({"result": {"columns": [{"column_name": "amount"}], "metrics": []}}),
+    ]
+    session.put.side_effect = [_FakeResponse({}), _FakeResponse({"result": {}})]
+    resource = SupersetResource(base_url="https://superset.example.com", api_key="my-key")
+    resource._session = session  # noqa: SLF001
+
+    resource.sync_dataset("Cube", "public", "orders_overview", [], [])
+
+    session.post.assert_not_called()  # no /api/v1/security/login call at all
+    assert session.headers["Authorization"] == "Bearer my-key"
+
+
+def test_constructor_raises_when_no_authentication_is_configured():
+    with pytest.raises(ValueError, match="api_key"):
+        SupersetResource(base_url="https://superset.example.com")
+
+
+def test_constructor_raises_when_api_key_and_password_auth_both_set():
+    with pytest.raises(ValueError, match="not both"):
+        SupersetResource(base_url="https://superset.example.com", api_key="k", username="u", password="p")
+
+
 def test_sync_dataset_only_authenticates_once_across_multiple_calls():
     session = MagicMock()
     session.post.side_effect = [_login_response()]

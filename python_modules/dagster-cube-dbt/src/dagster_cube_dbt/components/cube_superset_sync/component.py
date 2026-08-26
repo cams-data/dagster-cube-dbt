@@ -127,9 +127,9 @@ class CubeSupersetSyncComponent(dg.Component, dg.Resolvable):
     create that connection, the same way `CubeDbtProjectComponent` doesn't provision a running
     Cube instance. Two ways to provide the resource, chosen by whether `base_url` is set:
 
-    - **Set `base_url` (and `username`/`password`)** and this component builds and owns a
-      `SupersetResource` itself, directly from these attributes -- the common case, since
-      there's only one real `SupersetResource` implementation:
+    - **Set `base_url` (and either `username`/`password` or `api_key`)** and this component
+      builds and owns a `SupersetResource` itself, directly from these attributes -- the common
+      case, since there's only one real `SupersetResource` implementation:
 
             # defs.yaml
             type: dagster_cube_dbt.CubeSupersetSyncComponent
@@ -138,6 +138,16 @@ class CubeSupersetSyncComponent(dg.Component, dg.Resolvable):
               base_url: "https://superset.example.com"
               username: "{{ env.SUPERSET_USERNAME }}"
               password: "{{ env.SUPERSET_PASSWORD }}"
+
+      Or, for an account authenticated via LDAP/OIDC SSO (which has no password this component
+      could log in with) -- a Superset API key instead, see `SupersetResource`'s own docstring:
+
+            # defs.yaml
+            type: dagster_cube_dbt.CubeSupersetSyncComponent
+            attributes:
+              dbt_cube_component: "dbt_ingest"
+              base_url: "https://superset.example.com"
+              api_key: "{{ env.SUPERSET_API_KEY }}"
 
     - **Leave `base_url` unset** and this falls back to looking up a `SupersetResource` bound
       under `superset_resource_key` (`"superset"` by default) as an ordinary Dagster resource --
@@ -193,21 +203,34 @@ class CubeSupersetSyncComponent(dg.Component, dg.Resolvable):
     base_url: Annotated[
         str | None,
         Resolver.default(
-            description="Superset deployment's base URL. Setting this (with username and "
-            "password) means this component builds and owns its own SupersetResource "
-            "directly, instead of looking up one bound under superset_resource_key.",
+            description="Superset deployment's base URL. Setting this (with either "
+            "username+password or api_key) means this component builds and owns its own "
+            "SupersetResource directly, instead of looking up one bound under "
+            "superset_resource_key.",
         ),
     ] = field(default=None, kw_only=True)
     username: Annotated[
         str | None,
-        Resolver.default(description="Superset username. Required whenever base_url is set."),
+        Resolver.default(
+            description="Superset username. Required whenever base_url is set, unless api_key "
+            "is set instead.",
+        ),
     ] = field(default=None, kw_only=True)
     password: Annotated[
         str | None,
         Resolver.default(
-            description="Superset password. Required whenever base_url is set -- use "
-            "'{{ env.SOME_VAR }}' templating rather than a literal value in checked-in "
-            "defs.yaml.",
+            description="Superset password. Required whenever base_url is set (unless api_key "
+            "is set instead) -- use '{{ env.SOME_VAR }}' templating rather than a literal "
+            "value in checked-in defs.yaml.",
+        ),
+    ] = field(default=None, kw_only=True)
+    api_key: Annotated[
+        str | None,
+        Resolver.default(
+            description="Superset API key (used directly as a Bearer token) -- alternative to "
+            "username+password, for an account authenticated via LDAP/OIDC SSO. See "
+            "SupersetResource's own docstring for the Superset-side setup required. Set this "
+            "OR username+password, not both.",
         ),
     ] = field(default=None, kw_only=True)
     verify_tls: Annotated[
@@ -236,28 +259,37 @@ class CubeSupersetSyncComponent(dg.Component, dg.Resolvable):
     ] = field(default=None, kw_only=True)
 
     def build_managed_resource(self) -> SupersetResource | None:
-        """Returns a `SupersetResource` built directly from `base_url`/`username`/`password` if
-        `base_url` is set (the component-managed path), `None` if it's unset (the caller should
-        fall back to `superset_resource_key` instead). Raises clearly, rather than deferring to
-        a confusing `pydantic` error, if `base_url` is set but `username`/`password` aren't --
-        that combination unambiguously means the user intended the managed path but didn't
-        finish configuring it, not that they meant the external-resource path instead.
+        """Returns a `SupersetResource` built directly from `base_url` and either
+        `username`/`password` or `api_key` if `base_url` is set (the component-managed path),
+        `None` if it's unset (the caller should fall back to `superset_resource_key` instead).
+        Raises clearly, rather than deferring to a confusing `pydantic` error, if `base_url` is
+        set but authentication is missing or ambiguous -- that combination unambiguously means
+        the user intended the managed path but didn't finish configuring it, not that they meant
+        the external-resource path instead.
         """
         if self.base_url is None:
             return None
+        has_api_key = self.api_key is not None
+        has_password_auth = self.username is not None or self.password is not None
         missing = [name for name in ("username", "password") if getattr(self, name) is None]
-        if missing:
+        if has_api_key and has_password_auth:
+            raise dg.DagsterInvalidDefinitionError(
+                "base_url is set with both api_key and username/password configured -- set "
+                "one authentication method, not both."
+            )
+        if not has_api_key and missing:
             raise dg.DagsterInvalidDefinitionError(
                 "base_url is set, which means this component should build and manage its own "
-                f"SupersetResource directly, but {' and '.join(missing)} "
-                f"{'is' if len(missing) == 1 else 'are'} missing. Set base_url, username, and "
-                "password together, or remove base_url entirely (and set superset_resource_key) "
-                "to bind an existing SupersetResource externally instead."
+                "SupersetResource directly, but no authentication is configured "
+                f"({' and '.join(missing)} missing). Set base_url with either api_key, or both "
+                "username and password, together -- or remove base_url entirely (and set "
+                "superset_resource_key) to bind an existing SupersetResource externally instead."
             )
         return SupersetResource(
             base_url=self.base_url,
             username=self.username,
             password=self.password,
+            api_key=self.api_key,
             verify_tls=self.verify_tls,
         )
 

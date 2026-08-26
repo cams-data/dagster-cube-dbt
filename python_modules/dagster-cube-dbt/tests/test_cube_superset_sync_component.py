@@ -256,6 +256,23 @@ def test_build_managed_resource_raises_when_username_and_password_missing():
         _make_sync_component(base_url="https://s.example.com").build_managed_resource()
 
 
+def test_build_managed_resource_builds_a_superset_resource_from_an_api_key():
+    resource = _make_sync_component(
+        base_url="https://s.example.com", api_key="k"
+    ).build_managed_resource()
+    assert isinstance(resource, SupersetResource)
+    assert resource.api_key == "k"
+    assert resource.username is None
+    assert resource.password is None
+
+
+def test_build_managed_resource_raises_when_api_key_and_username_password_both_set():
+    with pytest.raises(dg.DagsterInvalidDefinitionError, match="not both"):
+        _make_sync_component(
+            base_url="https://s.example.com", api_key="k", username="u", password="p"
+        ).build_managed_resource()
+
+
 def test_multi_asset_op_uses_the_managed_resource_without_needing_one_externally_bound(tmp_path, defs_dir):
     """Setting `base_url`/`username`/`password` means the component builds its own
     `SupersetResource` -- the multi-asset op's `required_resource_keys` must not demand

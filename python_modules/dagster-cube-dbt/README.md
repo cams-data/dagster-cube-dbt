@@ -440,6 +440,18 @@ attributes:
 ```
 
 ```yaml
+# defs/superset_sync/defs.yaml -- component-managed, authenticated with a Superset API key
+# instead -- for an account whose auth provider isn't Superset's own DB login (e.g. LDAP/OIDC
+# SSO), which has no password this component could log in with.
+type: dagster_cube_dbt.CubeSupersetSyncComponent
+attributes:
+  dbt_cube_component: "dbt_ingest"
+  database_name: "Cube"
+  base_url: "https://superset.example.com"
+  api_key: "{{ env.SUPERSET_API_KEY }}"
+```
+
+```yaml
 # defs/superset_sync/defs.yaml -- external resource: leave base_url unset and bind a
 # SupersetResource yourself, for a test double, or one instance shared across multiple
 # components.
@@ -476,7 +488,7 @@ external-resource path is what you actually want.
 |---|---|
 | `dbt_cube_component` | Path to the `CubeDbtProjectComponent`'s `defs.yaml` directory, resolved relative to the top-level `defs` directory -- **not** relative to this component's own `defs.yaml` (no leading `../` needed even for a sibling directory). |
 | `database_name` | Name of the Superset database connection pointed at Cube's SQL API. Defaults to `"Cube"`. This component doesn't create that connection — set it up once in Superset yourself (see above), the same way `CubeDbtProjectComponent` assumes a running Cube instance already exists rather than provisioning one. |
-| `base_url` / `username` / `password` | Set together to have this component build and own its own `SupersetResource` directly. Leave all unset to fall back to `superset_resource_key` instead. |
+| `base_url` / `username` / `password` / `api_key` | Set `base_url` with either `username`+`password` or `api_key` to have this component build and own its own `SupersetResource` directly. Leave all unset to fall back to `superset_resource_key` instead. |
 | `verify_tls` | Passed straight through to the component-managed `SupersetResource`'s own `verify_tls` (only meaningful when `base_url` is set). Defaults to `True`. |
 | `superset_resource_key` | Resource key of the `SupersetResource` this component syncs through, when `base_url` is left unset. Defaults to `"superset"`. |
 | `sync_pool` | Dagster concurrency pool assigned to the dataset-sync multi-asset's op. Defaults to a name scoped to `dbt_cube_component` — set a max concurrency of 1 for it in the Dagster UI if two runs syncing the same Superset dataset concurrently turns out to be a problem, mirroring `promotion_pool` above. |
@@ -489,10 +501,20 @@ every dbt data refresh underneath it.
 
 `SupersetResource` handles the login/CSRF/find-or-create-dataset/refresh/update-columns flow
 against Superset's own REST API, authenticating once per resource instance rather than once per
-dataset. `password` (like `CubeRestApiClient.api_token`) is a plain `str` config field — bind it
-from wherever your project already manages secrets, not a literal value in checked-in
-`defs.yaml`: `{{ env.SOME_VAR }}` templating in the component-managed `defs.yaml` path above, or
-`dg.EnvVar(...)` in the external-resource `resources.py` path.
+dataset. Two ways to authenticate, set one or the other, not both:
+
+- `username`/`password` — plain `str` config fields (like `CubeRestApiClient.api_token`) — bind
+  them from wherever your project already manages secrets, not literal values in checked-in
+  `defs.yaml`: `{{ env.SOME_VAR }}` templating in the component-managed `defs.yaml` path above,
+  or `dg.EnvVar(...)` in the external-resource `resources.py` path. Exchanged for a session
+  token via Superset's own DB login once per resource instance, then cached.
+- `api_key` — a Superset [API key](https://superset.apache.org/admin-docs/security/#api-key-authentication)
+  (disabled by default; needs `FAB_API_KEY_ENABLED = True` in Superset's own
+  `superset_config.py`), used directly as the request's `Authorization: Bearer` token — no login
+  call at all. The only option for an account authenticated via LDAP/OIDC SSO, since those
+  accounts have no password `SupersetResource` could log in with. There's currently no support
+  for driving the interactive OIDC/SSO login flow itself, only for using an API key from an
+  already-SSO-authenticated account.
 
 `verify_tls` (default `True`) controls certificate verification for every request in that
 login/CSRF/find/create/refresh/update flow — the same option, and the same caveat, as

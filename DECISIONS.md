@@ -3179,4 +3179,22 @@ diagnosable rather than looking identical to ordinary propagation lag.
 
 - Read `action.yml`/`Dockerfile`/`action.sh`/`requirements.txt` directly from the `python-semantic-release/python-semantic-release` repo at the `v10.6.1` tag (via the GitHub REST API, unauthenticated) rather than assuming the action's internals -- confirmed the exact CLI invocation and output-writing mechanism before relying on either.
 - Confirmed upstream issues #1475/#1476/PR #1477 are all still open before deciding this was worth doing now rather than continuing to wait.
-- Not yet run in CI (this only takes effect on a push to `main`/`next` that triggers `release.yml`) -- the actual fix will be confirmed the next time a release runs after this merges to `next`.
+- Confirmed working in a real CI run: after merging to `next` (PR #20), `release.yml` ran end to end and produced `0.3.0-rc.1` -- the release pipeline is unblocked.
+
+## Phase 49 -- `SupersetResource.api_key`: authenticate without a `db`-provider username/password
+
+The user hit a real `401 Unauthorized` from `POST /api/v1/security/login` on their own Superset deployment. Root cause turned out to be their account not being marked active (an account-side issue, not a library bug) -- but investigating it surfaced a genuine gap: `_ensure_authenticated` always POSTs `{"provider": "db"}`, which only ever works for an account whose password Superset itself manages. An account authenticated via LDAP/OIDC SSO has no such password this resource could log in with at all, regardless of correctness. The user separately pointed at Superset's own API key support (https://superset.apache.org/admin-docs/security/#api-key-authentication) as the fix for that case, and asked for OIDC/SSO support "eventually."
+
+### Decisions
+
+- Read Superset's own API key docs directly (fetched, not assumed) before implementing: a key is a plain Bearer token, generated once through a user's own profile UI, used as `Authorization: Bearer <key>` -- no separate exchange step, unlike the existing login flow's `access_token`.
+- Added `api_key: str | None = None` to `SupersetResource`, alongside making `username`/`password` optional (previously required `str` fields). `_ensure_authenticated` now branches: if `api_key` is set, skip the `/api/v1/security/login` POST entirely and set the `Authorization` header directly from it; otherwise, the existing DB-login flow runs unchanged. The CSRF-token fetch still runs either way -- nothing in Superset's docs suggested API-key-authenticated requests are exempt from CSRF, and it's one cheap extra `GET` either way.
+- Enforced "set one or the other, not both" with a pydantic `model_validator(mode="after")` on `SupersetResource` itself (raises at construction time, not mid-run) -- consistent with the project's established preference for failing fast on config problems at the boundary rather than surfacing a confusing error deep in a call stack.
+- Mirrored the same validation in `CubeSupersetSyncComponent.build_managed_resource()` (an `api_key` field alongside `username`/`password`, both the "both set" and "neither set" cases raising `DagsterInvalidDefinitionError` with an actionable message) -- the same "raise clearly instead of deferring to a confusing pydantic error" reasoning Phase 44 already established for this method.
+- **Did not implement OIDC/SSO** -- driving an actual interactive SSO login flow (browser redirect, token exchange) is a fundamentally different, much larger piece of work than a config field, and nothing about the current request needs it: an API key generated from an already-SSO-authenticated account covers the user's actual use case. Documented this limitation explicitly in both `SupersetResource`'s docstring and the README, rather than leaving it to be discovered by a failed attempt.
+
+### Verification
+
+- Three new tests in `test_superset_resource.py`: `api_key` skips the login POST entirely and sets the `Authorization` header directly (confirmed via revert-and-confirm-fail -- temporarily forced the `api_key` branch off, watched the test fail on an unexpected `session.post` call, restored it); constructor raises with neither `api_key` nor `username`/`password` set; constructor raises with both set.
+- Two new tests in `test_cube_superset_sync_component.py`: `build_managed_resource` builds a `SupersetResource` from `api_key` alone (leaving `username`/`password` as `None`); raises when `api_key` and `username`/`password` are both set.
+- Full suite: **152/152 passed** (147 + 5 new tests).
