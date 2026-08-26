@@ -2756,10 +2756,21 @@ anything Superset-specific landed), `SupersetResource`, `CubeSupersetSyncCompone
   install) was written before Phase 39 made `requests` a base dependency for `landing_check`;
   Phase 39's own writeup already flagged this as a "still-hypothetical" future non-issue for
   Superset. Confirmed via `uv sync` (no extras) needing zero new packages beyond what Phase 39
-  already added. `CubeSupersetSyncComponent`/`SupersetResource` still aren't re-exported from
-  the top-level `dagster_cube_dbt` module, though -- that stays useful independent of the
-  dependency question, keeping that module's own import surface minimal for anyone who only
-  wants `CubeDbtProjectComponent`.
+  already added.
+- **Revisited: `CubeSupersetSyncComponent`/`SupersetResource` *are* re-exported from the
+  top-level `dagster_cube_dbt` module after all**, reversing this phase's initial decision to
+  keep them out. Caught by the user, testing this branch against a real consuming project via a
+  git dependency, asking why a full internal dotted path (`dagster_cube_dbt.components.
+  cube_superset_sync.component.CubeSupersetSyncComponent`) was needed in `defs.yaml` when every
+  other public symbol here is a plain top-level import. The original "keep the module's import
+  surface minimal" reasoning didn't actually hold once traced through: the only thing that
+  surface was ever protecting against was a hard `requests` dependency, and that protection had
+  already evaporated one bullet above, at the moment `SupersetResource` was written -- it just
+  wasn't followed through to this decision too. Left as originally written, it bought worse
+  ergonomics (an undiscoverable internal path in every `defs.yaml`) for zero remaining benefit.
+  Lesson: when a plan's stated rationale depends on a precondition, and a later decision in the
+  same phase invalidates that precondition, revisit every earlier decision that rationale fed
+  into -- not just the one bullet that happened to restate it.
 - **`SupersetResource`'s request/response shapes verified against a real, working reference
   implementation** (`ponderedw/dbt-to-cube`'s `SupersetConnector`), fetched and read directly
   (both via `WebFetch` and a raw `curl`, to see the literal source rather than a paraphrase) --

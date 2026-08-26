@@ -127,13 +127,13 @@ class CubeSupersetSyncComponent(dg.Component, dg.Resolvable):
     way `CubeDbtProjectComponent` doesn't provision a running Cube instance.
 
         # defs.yaml
-        type: dagster_cube_dbt.components.cube_superset_sync.component.CubeSupersetSyncComponent
+        type: dagster_cube_dbt.CubeSupersetSyncComponent
         attributes:
           dbt_cube_component: "../dbt_ingest"
 
         # e.g. defs/resources.py
         import dagster as dg
-        from dagster_cube_dbt.superset_resource import SupersetResource
+        from dagster_cube_dbt import SupersetResource
 
         @dg.definitions
         def resources():

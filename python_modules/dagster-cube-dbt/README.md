@@ -349,14 +349,11 @@ configuring datasets in Superset by hand.
 It's a separate component chained onto a `CubeDbtProjectComponent` via `context.load_component`
 — reading that component's already-generated, cached state directly — rather than a subclass,
 so `project:`/`cube_select:`/merge-patch config lives in exactly one `defs.yaml` block, not
-duplicated across two. Not re-exported from the top-level `dagster_cube_dbt` module (unlike
-`CubeDbtProjectComponent`) — that module is imported unconditionally by anything importing
-`dagster_cube_dbt` at all, and this component's own resource (`SupersetResource`) pulls in
-`requests`, so both are referenced by their full dotted path instead:
+duplicated across two:
 
 ```yaml
 # defs.yaml, e.g. defs/superset_sync/defs.yaml
-type: dagster_cube_dbt.components.cube_superset_sync.component.CubeSupersetSyncComponent
+type: dagster_cube_dbt.CubeSupersetSyncComponent
 attributes:
   dbt_cube_component: "../dbt_ingest"   # path to the CubeDbtProjectComponent's defs.yaml dir
   database_name: "Cube"                 # default; the Superset database connection's name
@@ -365,7 +362,7 @@ attributes:
 ```python
 # e.g. defs/resources.py
 import dagster as dg
-from dagster_cube_dbt.superset_resource import SupersetResource
+from dagster_cube_dbt import SupersetResource
 
 @dg.definitions
 def resources():
