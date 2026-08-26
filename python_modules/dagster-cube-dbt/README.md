@@ -335,6 +335,67 @@ same contract `CubeFilePromoter.promote` itself has — since a failed run leave
 `code_version` unchanged, the next automation evaluation just retries the whole
 promote-then-poll cycle.
 
+## Syncing views into Apache Superset
+
+A separate, standalone component — `CubeSupersetSyncComponent` — syncs each generated Cube
+**view** (not cubes — Cube's own convention is that views are the intended BI-facing query
+layer) into a matching [Apache Superset](https://superset.apache.org/) dataset: column
+`verbose_name`/`description`/groupby/filter flags from the view's dimensions, and one metric
+per measure, expressed via Cube SQL API's own aggregation-pushdown syntax
+(`MEASURE(<view>.<measure>)`) so Cube — not Superset — performs the aggregation. This gives BI
+users column descriptions and pre-defined metrics for every view without anyone manually
+configuring datasets in Superset by hand.
+
+It's a separate component chained onto a `CubeDbtProjectComponent` via `context.load_component`
+— reading that component's already-generated, cached state directly — rather than a subclass,
+so `project:`/`cube_select:`/merge-patch config lives in exactly one `defs.yaml` block, not
+duplicated across two:
+
+```yaml
+# defs.yaml, e.g. defs/superset_sync/defs.yaml
+type: dagster_cube_dbt.CubeSupersetSyncComponent
+attributes:
+  dbt_cube_component: "../dbt_ingest"   # path to the CubeDbtProjectComponent's defs.yaml dir
+  database_name: "Cube"                 # default; the Superset database connection's name
+```
+
+```python
+# e.g. defs/resources.py
+import dagster as dg
+from dagster_cube_dbt import SupersetResource
+
+@dg.definitions
+def resources():
+    return dg.Definitions(
+        resources={
+            "superset": SupersetResource(
+                base_url="https://superset.example.com",
+                username=dg.EnvVar("SUPERSET_USERNAME"),
+                password=dg.EnvVar("SUPERSET_PASSWORD"),
+            )
+        }
+    )
+```
+
+| Attribute | Description |
+|---|---|
+| `dbt_cube_component` | Path to the `CubeDbtProjectComponent`'s `defs.yaml` directory, resolved relative to the defs root. |
+| `database_name` | Name of the Superset database connection pointed at Cube's SQL API. Defaults to `"Cube"`. This component doesn't create that connection — set it up once in Superset yourself, the same way `CubeDbtProjectComponent` assumes a running Cube instance already exists rather than provisioning one. |
+| `superset_resource_key` | Resource key of the `SupersetResource` this component syncs through. Defaults to `"superset"`. |
+| `sync_pool` | Dagster concurrency pool assigned to the dataset-sync multi-asset's op. Defaults to a name scoped to `dbt_cube_component` — set a max concurrency of 1 for it in the Dagster UI if two runs syncing the same Superset dataset concurrently turns out to be a problem, mirroring `promotion_pool` above. |
+
+Each dataset asset depends on the corresponding view asset (through the sibling component's own
+`get_view_asset_spec`/`asset_key_for_view` — so a subclass renaming view keys is still
+respected automatically) and reuses `GENERATED_ASSET_AUTOMATION_CONDITION`: a dataset only
+needs updating when the view's own generated definition changes (its `code_version`), not on
+every dbt data refresh underneath it.
+
+`SupersetResource` handles the login/CSRF/find-or-create-dataset/refresh/update-columns flow
+against Superset's own REST API, authenticating once per resource instance rather than once per
+dataset. `password` (like `CubeRestApiClient.api_token`) is a plain `str` config field — bind it
+from wherever your project already manages secrets (`dg.EnvVar(...)`, as above), not a literal
+value in checked-in `defs.yaml`.
+
 ## Base generation rules
 
 For each dbt model, reading `manifest.json` directly (see `manifest.py` — this library has no
@@ -909,7 +970,38 @@ do (not something CI or an agent can do on your behalf):
    - Environment name: `pypi`
 
 After that, every push to `main`/`next` that contains a releasable commit publishes itself —
-no further manual steps.
+no further manual steps, aside from the release GitHub App setup below (needed once `main`/
+`next` are ruleset-protected).
+
+### Letting the release bot push past branch protection
+
+Once a repository ruleset requiring PRs is active on `main`/`next`, the default
+`GITHUB_TOKEN` the `release` job used to push with is blocked too: it authenticates as
+`github-actions[bot]`, and the ruleset has no way to tell that push apart from an accidental
+direct one. Rather than exempt that generic bot identity outright, or fall back to a personal
+access token (ties the pipeline to one person's account, a long-lived secret, and stops working
+if that account changes), `release.yml` mints a short-lived token from a dedicated GitHub App
+instead -- its own distinct bot identity, explicitly exempted, expiring in about an hour rather
+than sitting in secrets indefinitely. One-time setup, manual (only a maintainer with admin
+access can do this):
+
+1. Create a GitHub App (Settings → Developer settings → GitHub Apps → New GitHub App) with
+   **Contents: Read and write** repository permission (covers both pushing commits and
+   creating GitHub Releases via the API -- no other permission needed) and no webhook.
+2. Install it on this repository only.
+3. On the App's settings page, **Generate a private key** (downloads a `.pem` file).
+4. Store the App's **Client ID** as a repo **variable** named `RELEASE_APP_CLIENT_ID`, and the
+   private key's full contents -- including the `-----BEGIN`/`-----END` lines -- as a repo
+   **secret** named `RELEASE_APP_PRIVATE_KEY`. Use the **Client ID**, not the numeric App ID --
+   `actions/create-github-app-token`'s `app-id` input is deprecated in favor of `client-id`,
+   and in this project's own setup, using `app-id` (with a real, already-generated private key)
+   produced a `401 Integration must generate a public key` error that `client-id` didn't --
+   confirmed by fixing it, not fully explained by GitHub's error message, which points at a
+   missing key even though one existed.
+5. Add the App to the ruleset's bypass list (Settings → Rules → Rulesets → the ruleset
+   targeting `main`/`next` → Bypass list → Apps), with bypass mode **Exempt** -- "Always"
+   still evaluates the ruleset as an interactive "break glass" confirmation, which a
+   non-interactive `git push` from CI has no way to respond to.
 
 ## Documentation
 

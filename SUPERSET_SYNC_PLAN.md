@@ -1,8 +1,10 @@
 # Superset dataset sync -- development plan
 
-**Status**: Planning. Not started. This is a large, separable addition on top of the
-`CubeDbtProjectComponent` work tracked in [PLAN.md](PLAN.md)/[DECISIONS.md](DECISIONS.md); this
-file tracks it independently rather than folding it into those.
+**Status**: Implemented (`CubeSupersetSyncComponent` + `SupersetResource`, see DECISIONS.md
+Phase 42 for what actually happened and what deviated from this plan along the way). This was a
+large, separable addition on top of the `CubeDbtProjectComponent` work tracked in
+[PLAN.md](PLAN.md)/[DECISIONS.md](DECISIONS.md); this file tracked it independently rather than
+folding it into those, and stays as the design record.
 
 ## Goal
 
@@ -140,14 +142,21 @@ src/dagster_cube_dbt/
                                              # a format cube_superset_sync also needs to parse
 ```
 
-`CubeSupersetSyncComponent` and `SupersetResource` are **not** re-exported from the top-level
-`dagster_cube_dbt/__init__.py` (unlike `CubeDbtProjectComponent`/`CubeFilePromoter` today) --
-that file is imported unconditionally by anything that imports `dagster_cube_dbt` at all, and
-must keep working with only the base install (no `requests`). `defs.yaml` would reference the
-component by its full module path:
+**Revised after initial implementation** (the user pushed back on real-world usability once
+testing against a consuming project): `CubeSupersetSyncComponent` and `SupersetResource` *are*
+re-exported from the top-level `dagster_cube_dbt/__init__.py`, the same as every other public
+symbol in this library. The original plan here said not to, reasoning that the top-level module
+is imported unconditionally by anything importing `dagster_cube_dbt` at all and shouldn't force
+a hard `requests` dependency on projects that don't need Superset -- but `requests` was already
+made a *base* dependency back when `landing_check` shipped (before `SupersetResource` was ever
+written), so there was no dependency boundary left to protect. Left in place, the decision only
+bought worse ergonomics (a full internal dotted path required in every `defs.yaml`) for no
+actual benefit -- worth recording as a case where a plan's stated rationale should have been
+revisited once its precondition (no base `requests` dependency) stopped being true, rather than
+carried forward unquestioned into implementation.
 
 ```yaml
-type: dagster_cube_dbt.components.cube_superset_sync.component.CubeSupersetSyncComponent
+type: dagster_cube_dbt.CubeSupersetSyncComponent
 attributes:
   dbt_cube_component: "../dbt_ingest"   # path to the CubeDbtProjectComponent's defs.yaml dir
   database_name: "Cube"

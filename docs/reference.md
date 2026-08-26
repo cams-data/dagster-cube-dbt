@@ -34,3 +34,11 @@ narrative usage docs (dbt conventions, merge patches, promotion resources, etc).
 ## `CubeRestApiClient`
 
 ::: dagster_cube_dbt.CubeRestApiClient
+
+## `CubeSupersetSyncComponent`
+
+::: dagster_cube_dbt.CubeSupersetSyncComponent
+
+## `SupersetResource`
+
+::: dagster_cube_dbt.SupersetResource
