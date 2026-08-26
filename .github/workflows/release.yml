@@ -56,14 +56,29 @@ jobs:
       - name: Force release branch to be at workflow sha
         run: git reset --hard ${{ github.sha }}
 
+      - uses: astral-sh/setup-uv@v10.0.1
+
+      # The python-semantic-release/python-semantic-release Docker action rebuilds its image
+      # fresh from an unpinned GitPython on every run, which currently breaks on GitPython
+      # 3.1.60 removing Actor.name_email_regex (upstream python-semantic-release#1475/#1476,
+      # fix python-semantic-release#1477 -- all still open as of 2026-08). Rather than wait,
+      # this runs the exact same `semantic-release version` CLI the action itself shells out to
+      # (confirmed against its src/gh_action/action.sh) as a plain step instead, with GitPython
+      # pinned to the last working release -- the same workaround
+      # OpenJobDescription/openjd-model-for-python#339 used for this bug, adapted from their
+      # pip-based release step to our uv-based one. GITHUB_OUTPUT is written by the CLI itself
+      # (semantic_release/cli/github_actions_output.py), not the action wrapper, so
+      # steps.release.outputs.* below are unaffected by dropping the Docker action.
       - name: Version, changelog, tag & GitHub Release
         id: release
-        uses: python-semantic-release/python-semantic-release@v10.6.1
-        with:
-          directory: python_modules/dagster-cube-dbt
-          github_token: ${{ steps.app-token.outputs.token }}
-          git_committer_name: "${{ steps.app-token.outputs.app-slug }}[bot]"
-          git_committer_email: "${{ steps.app-token.outputs.app-slug }}[bot]@users.noreply.github.com"
+        working-directory: python_modules/dagster-cube-dbt
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          GIT_COMMIT_AUTHOR: "${{ steps.app-token.outputs.app-slug }}[bot] <${{ steps.app-token.outputs.app-slug }}[bot]@users.noreply.github.com>"
+        run: |
+          git config --global user.name "${{ steps.app-token.outputs.app-slug }}[bot]"
+          git config --global user.email "${{ steps.app-token.outputs.app-slug }}[bot]@users.noreply.github.com"
+          uvx --from python-semantic-release==10.6.1 --with GitPython==3.1.59 semantic-release -v version
 
   publish:
     name: Build & publish to PyPI
