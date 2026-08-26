@@ -3162,3 +3162,21 @@ diagnosable rather than looking identical to ordinary propagation lag.
   class -- no other change needed, proving the ABC was never load-bearing for them.
 - `mkdocs build --strict` clean.
 - Full suite: **144/144 passed** (140 + 4 new retry tests).
+
+## Phase 48 -- worked around the release pipeline's GitPython/`python-semantic-release` breakage instead of continuing to wait on it
+
+`release.yml` had been blocked since before Phase 44: `python-semantic-release/python-semantic-release@v10.6.1` (the official Docker action) fails on `AttributeError: type object 'Actor' has no attribute 'name_email_regex'`. Root cause confirmed upstream, not ours: GitPython 3.1.60 removed that attribute, `python-semantic-release`'s own `src/gh_action/requirements.txt` pins only `python-semantic-release == 10.6.1` with no GitPython constraint, and the action's Dockerfile rebuilds that image fresh (no lockfile) on every single run -- so every run resolves whatever GitPython is newest at that moment, unconditionally broken since the moment 3.1.60 was published. Upstream issues #1475/#1476 and fix PR #1477 all still open as of 2026-08-26. The user chose to wait for upstream twice already (see [[project_release_pipeline_blocked_gitpython]]); this time, prompted by a workaround the user found in the wild (`OpenJobDescription/openjd-model-for-python`'s commit `10859dfd`), asked to reconsider.
+
+### Decisions
+
+- OpenJobDescription's own fix -- pin `GitPython == 3.1.59` (the last version before the breaking removal) in their `requirements-release.txt` -- doesn't transplant directly: their release step installs `python-semantic-release` via plain `pip install -r`, ours goes through the Docker action, which builds from a `requirements.txt` we don't control and have no input to inject a constraint into.
+- Fetched the action's own `action.yml`/`Dockerfile`/`action.sh` at the `v10.6.1` tag to check what it actually does under the hood, rather than guessing: `action.sh` turns out to be a thin wrapper that just runs `semantic-release [-v] version [--commit/--tag/--push/--changelog/--vcs-release ...]` with `GH_TOKEN` set and git committer config applied -- nothing container-specific, and with none of our optional inputs set, every one of those flags evaluates to the CLI's own defaults (i.e. our current invocation is functionally just `semantic-release -v version`).
+- Replaced the Docker action step with a plain step: `uvx --from python-semantic-release==10.6.1 --with GitPython==3.1.59 semantic-release -v version`, run with `working-directory: python_modules/dagster-cube-dbt` (matching the action's `directory:` input) and `GH_TOKEN`/git committer config set to the same values the action was already passed -- the same workaround as OpenJobDescription's, adapted from their pip-based release step to our uv-based one.
+- Confirmed `steps.release.outputs.released/tag/version` (consumed by the `publish` job's `if:` and `environment.url`) survive dropping the Docker action: `GITHUB_OUTPUT` is written directly by the CLI itself (`semantic_release/cli/github_actions_output.py`'s `write_if_possible`, keyed off the `GITHUB_OUTPUT` env var GitHub Actions sets on every step regardless of container vs. plain), not by `action.sh` or anything Docker-specific.
+- Skipped `action.sh`'s `git config --system --add safe.directory "*"` -- that exists to work around a UID mismatch between the container's root user and the host filesystem owner, which doesn't apply once this runs as a plain step in the same user context as the checkout.
+
+### Verification
+
+- Read `action.yml`/`Dockerfile`/`action.sh`/`requirements.txt` directly from the `python-semantic-release/python-semantic-release` repo at the `v10.6.1` tag (via the GitHub REST API, unauthenticated) rather than assuming the action's internals -- confirmed the exact CLI invocation and output-writing mechanism before relying on either.
+- Confirmed upstream issues #1475/#1476/PR #1477 are all still open before deciding this was worth doing now rather than continuing to wait.
+- Not yet run in CI (this only takes effect on a push to `main`/`next` that triggers `release.yml`) -- the actual fix will be confirmed the next time a release runs after this merges to `next`.
