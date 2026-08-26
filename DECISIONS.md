@@ -2951,3 +2951,114 @@ footer needed, no forced major/minor bump beyond a normal `feat:`).
   compatibility only for now.
 - `mkdocs build --strict` clean.
 - Full suite: **138/138 passed** (130 + 4 landing_check + 4 Superset sync).
+
+## Phase 45 -- two real production bugs in `get_view_asset_spec`'s dependency resolution, and a docs bug in `dbt_cube_component`'s path semantics
+
+Both found by the user via real usage: their first hand-authored view (multi-cube joins off one
+fact cube) came back with no upstream dependencies at all, and a git-installed test of the
+Superset sync component against a real consuming project showed `dbt_cube_component: "../dbt_ingest"`
+(this project's own documented example) failing to resolve, while the same value without `../`
+worked.
+
+### The path-resolution docs bug
+
+`context.load_component`'s relative-path resolution is anchored to `context.defs_module_path`
+-- confirmed by reading `ComponentLoadContext.load_component`'s real source (`ComponentPath.
+from_resolvable(self.defs_module_path, defs_path)`) and by reproducing both forms directly
+against the `dg`-runnable example project (`python_modules/dagster-cube-dbt-tests/`): a sibling
+directory (`defs/dbt_ingest/` next to `defs/superset_sync/`) resolves as `"dbt_ingest"`, not
+`"../dbt_ingest"` -- the latter literally looks one level *above* the top-level `defs/`
+directory and fails with "No component found for loc ...defs/../dbt_ingest". `defs_module_path`
+is the whole tree's root, fixed for every component regardless of its own position in the tree
+-- not the calling component's own directory, which is what the original `"../dbt_ingest"`
+examples (written before this was ever tested against a real multi-component project) assumed.
+Fixed everywhere this appeared: the component's own docstring/field description, README.md
+(both `defs.yaml` examples plus the attributes table), and `SUPERSET_SYNC_PLAN.md` (left with a
+note explaining the correction rather than silently rewritten, matching this doc's own
+practice elsewhere).
+
+### The dependency-resolution bugs
+
+Both bugs live in `CubeDbtProjectComponent.get_view_asset_spec`'s `deps` computation (and were
+mirrored into `cube_superset_sync/component.py`'s `_resolve_view_members`, which was written to
+deliberately match this method's behavior -- Phase 42's own writeup flagged the single-hop
+assumption as a known limitation, not realizing it was actually just wrong):
+
+- **Multi-hop `join_path` collapsed onto the wrong cube.** A view member's `join_path` is a
+  dot-separated chain of cube names (e.g. `"route_calculated_fct.dates"`, Cube's own syntax for
+  "reach `dates`'s members by joining through `route_calculated_fct`") -- the cube that entry's
+  `includes`/`excludes` actually apply to is the *last* segment, not the first. The old code
+  took the first segment (`str(member["join_path"]).split(".")[0]`), so a view with several
+  members chained off one fact cube (the user's real `auckland_commutes` view: four `cubes:`
+  entries, one bare `route_calculated_fct` and three two-hop ones reaching `dates`/`times`/
+  `routes`) collapsed all four onto the single name `"route_calculated_fct"` -- silently
+  dropping the dependency on every dimension cube. Not a single-hop "limitation" as Phase 42
+  described it; a straightforwardly wrong assumption about which segment of the path is the
+  actual member cube, caught the first time a real project used a multi-hop join_path at all
+  (this project's own fixture data only ever exercised single-segment paths).
+- **Override-unsafe key derivation** -- the exact class of bug DECISIONS.md Phase 37/40 already
+  fixed twice for cube-to-cube (`extends`) and `landing_check` name lookups, but never applied
+  to a view's dependency on its *member cubes*: `deps=[self.asset_key_for_cube(member_name)
+  ...]` called `asset_key_for_cube` directly -- the un-renamed default key shape -- instead of
+  resolving through `self._cube_asset_spec_by_name`/`get_cube_asset_spec`, the one overridable,
+  memoized path every other cube-identity lookup in this file already goes through. The user's
+  own real `CustomDbtProjectComponent` overrides `get_cube_asset_spec` to compute a completely
+  different key (`AssetKey(["cube", group, f"{name}_cube"])`) -- so even with the multi-hop bug
+  fixed, the view's `deps` would still have pointed at asset keys that don't exist anywhere in
+  their real graph, which is consistent with "no upstream dependencies" being what they actually
+  observed (a dependency on a nonexistent key doesn't show up as a real edge to anything).
+
+### Decision
+
+Fixed both in one pass, since they compound in the user's real case (multi-hop *and* a renamed
+key): `member_cube_names` now takes `split(".")[-1]`; each dependency is resolved via
+`self._cube_asset_spec_by_name(member_name).key`, with a clear `DagsterInvalidDefinitionError`
+(naming the view and the missing cube) if a `join_path` segment doesn't match any generated
+cube, rather than a bare `KeyError`. `_resolve_view_members` in `cube_superset_sync/component.py`
+got the same one-line fix (first segment -> last segment) and an updated docstring pointing at
+`get_view_asset_spec`'s own docstring for the full story, rather than re-explaining it.
+
+**Second regression, caught by the test suite immediately after the fix above**: resolving a
+view's cube dependency through `self._cube_asset_spec_by_name` requires `self.
+_cube_dicts_by_name`/`self._cube_spec_cache` (and, transitively, `self._state_aware_manifest`/
+`self._state_aware_project` for a cube with no `extends` parent) -- all previously populated
+only inline inside `build_defs_from_state`. `CubeSupersetSyncComponent.build_defs_from_sibling_
+state` calls `sibling.get_view_asset_spec(view)` directly on a sibling obtained via `context.
+load_component` (Phase 42) or, in tests, a bare constructor -- neither path ever calls that
+sibling's own `build_defs_from_state`, so none of that state existed on it, and every test in
+`test_cube_superset_sync_component.py` broke with an `AttributeError` the moment the fix above
+landed. This wasn't a test-only artifact: `context.load_component` genuinely only loads/resolves
+a component (runs `Component.load()`), it does not build its defs -- a real project using
+`CubeSupersetSyncComponent` would have hit the exact same `AttributeError` in production.
+Fixed by extracting the whole "populate cube identity/dependency lookup from cached state"
+block out of `build_defs_from_state` into a new method, `prepare_state_aware_lookup(state_path)`
+-- callable on any `CubeDbtProjectComponent` instance regardless of whether its own
+`build_defs_from_state` has run, returning the parsed `cube_dbt_state.json` content so callers
+don't re-read it. `CubeSupersetSyncComponent` now calls `sibling.prepare_state_aware_lookup(
+state_path)` before touching `sibling.get_view_asset_spec`; `build_defs_from_state` calls the
+same method for its own defs, unchanged in behavior. A good example of why testing the actual
+cross-component chaining path (not just each component in isolation) matters -- this would not
+have been caught by `test_component_integration.py` alone, since nothing there ever calls
+`get_view_asset_spec` on a component that skipped `build_defs_from_state`.
+
+### Verification
+
+- Two new regression tests in `test_component_integration.py`: a multi-hop `join_path`
+  (`"journey_samples.dates"`, added to the existing fixture's `journeys_overview` view by
+  rewriting cached state, the same technique Phase 37/40's tests use) resolves a dependency on
+  `dates`, not just `journey_samples`; and a `RenamingComponent` overriding `get_cube_asset_spec`
+  (mirroring Phase 40's exact override shape) shows the view depending on the *renamed* cube
+  keys, not the defaults.
+- Updated `test_resolve_view_members_uses_only_the_first_segment_of_a_dotted_join_path` (Phase
+  42's own test, which had encoded the bug as if it were an intentional limitation) into
+  `test_resolve_view_members_uses_the_last_segment_of_a_dotted_join_path`, asserting the correct
+  behavior instead.
+- Both new integration tests, and the updated unit test, confirmed to actually catch the
+  regression: reverted each fix in turn, watched the corresponding test(s) fail with a clear
+  diff (wrong/missing asset keys), restored the fix.
+- Path-resolution behavior confirmed directly against `python_modules/dagster-cube-dbt-tests/`
+  (a real `dg check defs` run, not just read from source): `dbt_cube_component: "dbt_cubes"`
+  (sibling directory, no `../`) validates cleanly; `"../dbt_cubes"` fails with "No component
+  found for loc ...defs/../dbt_cubes".
+- `mkdocs build --strict` clean.
+- Full suite: **140/140 passed** (138 + 2 new regression tests).

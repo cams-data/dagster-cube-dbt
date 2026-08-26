@@ -405,16 +405,23 @@ once, by hand, before configuring `CubeSupersetSyncComponent` itself:
    there's no per-view Superset database to create; only per-view **datasets**, which is exactly
    what `CubeSupersetSyncComponent` automates from here on.
 
+`dbt_cube_component` is resolved relative to the project's **top-level `defs` directory**, not
+relative to `CubeSupersetSyncComponent`'s own `defs.yaml` -- for a layout like
+`defs/dbt_ingest/defs.yaml` (the `CubeDbtProjectComponent`) and `defs/superset_sync/defs.yaml`
+(this component), the value is `"dbt_ingest"`, **not** `"../dbt_ingest"`; a leading `../` looks
+one level *above* `defs/` and fails to resolve.
+
 Two ways to give this component a `SupersetResource` to sync through, chosen by whether
 `base_url` is set:
 
 ```yaml
-# defs.yaml -- component-managed (the common case): set base_url/username/password directly
-# and this component builds and owns its own SupersetResource, no separate resource binding
-# needed.
+# defs/superset_sync/defs.yaml -- component-managed (the common case): set
+# base_url/username/password directly and this component builds and owns its own
+# SupersetResource, no separate resource binding needed.
 type: dagster_cube_dbt.CubeSupersetSyncComponent
 attributes:
-  dbt_cube_component: "../dbt_ingest"   # path to the CubeDbtProjectComponent's defs.yaml dir
+  dbt_cube_component: "dbt_ingest"      # path to the CubeDbtProjectComponent's defs.yaml dir,
+                                         # relative to defs/ -- not to this file's own directory
   database_name: "Cube"                 # default; the Superset database connection's name
   base_url: "https://superset.example.com"
   username: "{{ env.SUPERSET_USERNAME }}"
@@ -422,11 +429,12 @@ attributes:
 ```
 
 ```yaml
-# defs.yaml -- external resource: leave base_url unset and bind a SupersetResource yourself,
-# for a test double, or one instance shared across multiple components.
+# defs/superset_sync/defs.yaml -- external resource: leave base_url unset and bind a
+# SupersetResource yourself, for a test double, or one instance shared across multiple
+# components.
 type: dagster_cube_dbt.CubeSupersetSyncComponent
 attributes:
-  dbt_cube_component: "../dbt_ingest"
+  dbt_cube_component: "dbt_ingest"
   database_name: "Cube"
   superset_resource_key: "superset"    # default; only worth changing with more than one instance
 ```
@@ -455,7 +463,7 @@ external-resource path is what you actually want.
 
 | Attribute | Description |
 |---|---|
-| `dbt_cube_component` | Path to the `CubeDbtProjectComponent`'s `defs.yaml` directory, resolved relative to the defs root. |
+| `dbt_cube_component` | Path to the `CubeDbtProjectComponent`'s `defs.yaml` directory, resolved relative to the top-level `defs` directory -- **not** relative to this component's own `defs.yaml` (no leading `../` needed even for a sibling directory). |
 | `database_name` | Name of the Superset database connection pointed at Cube's SQL API. Defaults to `"Cube"`. This component doesn't create that connection — set it up once in Superset yourself (see above), the same way `CubeDbtProjectComponent` assumes a running Cube instance already exists rather than provisioning one. |
 | `base_url` / `username` / `password` | Set together to have this component build and own its own `SupersetResource` directly. Leave all unset to fall back to `superset_resource_key` instead. |
 | `superset_resource_key` | Resource key of the `SupersetResource` this component syncs through, when `base_url` is left unset. Defaults to `"superset"`. |

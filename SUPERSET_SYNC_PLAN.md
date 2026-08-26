@@ -158,7 +158,16 @@ carried forward unquestioned into implementation.
 ```yaml
 type: dagster_cube_dbt.CubeSupersetSyncComponent
 attributes:
-  dbt_cube_component: "../dbt_ingest"   # path to the CubeDbtProjectComponent's defs.yaml dir
+  dbt_cube_component: "dbt_ingest"   # path to the CubeDbtProjectComponent's defs.yaml dir --
+                                      # relative to the top-level defs/ directory, NOT to this
+                                      # file's own directory. A real consuming project caught
+                                      # this: "../dbt_ingest" (this plan's original guess, based
+                                      # on ComponentLoadContext.load_component's docstring
+                                      # reading like ordinary filesystem-relative addressing)
+                                      # fails to resolve; confirmed via context.load_component's
+                                      # real implementation, which anchors every relative path
+                                      # to context.defs_module_path (the tree root), not the
+                                      # calling component's own directory.
   database_name: "Cube"
   superset_resource_key: "superset"
 ```

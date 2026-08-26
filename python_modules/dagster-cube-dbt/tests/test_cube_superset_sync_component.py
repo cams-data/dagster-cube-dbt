@@ -329,13 +329,25 @@ def test_resolve_view_members_skips_members_with_no_join_path_or_unknown_cube():
     assert measures == []
 
 
-def test_resolve_view_members_uses_only_the_first_segment_of_a_dotted_join_path():
-    """Mirrors `get_view_asset_spec`'s own `join_path.split(".")[0]` single-hop assumption --
-    see `_resolve_view_members`'s docstring for why this deliberately isn't more clever.
+def test_resolve_view_members_uses_the_last_segment_of_a_dotted_join_path():
+    """Regression test for a real production bug: a multi-hop `join_path` (e.g.
+    `"fact.dates"`) names the cube reached by joining *through* the first segment(s) -- the
+    entry's `includes`/`excludes` apply to the *last* segment, not the first. An earlier
+    version of this took the first segment, which -- for a view with several members chained
+    off one fact cube (`"fact.dates"`, `"fact.times"`, `"fact.routes"`) -- silently collapsed
+    all of them onto just the fact cube, dropping every dimension table's members entirely.
     """
-    resolved_cubes = {"a": {"dimensions": [{"name": "x"}], "measures": []}}
-    view = {"cubes": [{"join_path": "a.b", "includes": "*"}]}
+    resolved_cubes = {
+        "fact": {"dimensions": [{"name": "amount"}], "measures": []},
+        "dates": {"dimensions": [{"name": "date_key"}], "measures": []},
+    }
+    view = {
+        "cubes": [
+            {"join_path": "fact", "includes": "*"},
+            {"join_path": "fact.dates", "includes": "*"},
+        ]
+    }
 
     dimensions, _measures = _resolve_view_members(view, resolved_cubes)
 
-    assert {d["name"] for d in dimensions} == {"x"}
+    assert {d["name"] for d in dimensions} == {"amount", "date_key"}

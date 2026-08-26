@@ -27,7 +27,6 @@ from dagster_cube_dbt.components.cube_dbt_project.component import (
     GENERATED_ASSET_AUTOMATION_CONDITION,
     CubeDbtProjectComponent,
 )
-from dagster_cube_dbt.cube_state import read_cube_state
 from dagster_cube_dbt.merge import resolve_extends
 from dagster_cube_dbt.superset_resource import SupersetResource
 
@@ -51,10 +50,11 @@ def _resolve_view_members(
     fixture/production case so far; a view using it will under-resolve, a natural follow-up if
     that turns out to matter.
 
-    `join_path.split(".")[0]` mirrors `CubeDbtProjectComponent.get_view_asset_spec`'s own
-    single-hop assumption for which cube a member belongs to, for the same reason: consistent
-    with the one real dependency-resolution case already exercised in this codebase, rather
-    than inventing separate (and possibly diverging) multi-hop handling here.
+    A member's `join_path` is a dot-separated chain of cube names (e.g. `"orders.customers"`),
+    not necessarily a single cube -- the cube that entry's `includes`/`excludes` actually apply
+    to is the *last* segment, matching `CubeDbtProjectComponent.get_view_asset_spec`'s own
+    dependency resolution (see its docstring for the real production view that broke an
+    earlier, first-segment version of both of these).
     """
     dimensions_by_name: dict[str, dict[str, Any]] = {}
     measures_by_name: dict[str, dict[str, Any]] = {}
@@ -62,7 +62,7 @@ def _resolve_view_members(
         join_path = member.get("join_path")
         if join_path is None:
             continue
-        cube = resolved_cubes.get(str(join_path).split(".")[0])
+        cube = resolved_cubes.get(str(join_path).split(".")[-1])
         if cube is None:
             continue
         includes = member.get("includes", "*")
@@ -134,7 +134,7 @@ class CubeSupersetSyncComponent(dg.Component, dg.Resolvable):
             # defs.yaml
             type: dagster_cube_dbt.CubeSupersetSyncComponent
             attributes:
-              dbt_cube_component: "../dbt_ingest"
+              dbt_cube_component: "dbt_ingest"  # relative to defs/, not to this file's own directory
               base_url: "https://superset.example.com"
               username: "{{ env.SUPERSET_USERNAME }}"
               password: "{{ env.SUPERSET_PASSWORD }}"
@@ -146,7 +146,7 @@ class CubeSupersetSyncComponent(dg.Component, dg.Resolvable):
             # defs.yaml
             type: dagster_cube_dbt.CubeSupersetSyncComponent
             attributes:
-              dbt_cube_component: "../dbt_ingest"
+              dbt_cube_component: "dbt_ingest"  # relative to defs/, not to this file's own directory
 
             # e.g. defs/resources.py
             import dagster as dg
@@ -180,7 +180,10 @@ class CubeSupersetSyncComponent(dg.Component, dg.Resolvable):
         str,
         Resolver.default(
             description="Path to the CubeDbtProjectComponent's defs.yaml directory, resolved "
-            "relative to the defs root -- passed straight to context.load_component.",
+            "relative to the project's top-level defs directory -- NOT relative to this "
+            "component's own defs.yaml, so a sibling directory needs no leading '../' (e.g. "
+            "'dbt_ingest', not '../dbt_ingest'). Passed straight to context.load_component, "
+            "which resolves it this same way.",
         ),
     ]
     database_name: Annotated[
@@ -270,7 +273,12 @@ class CubeSupersetSyncComponent(dg.Component, dg.Resolvable):
         it can be exercised directly against a manually constructed sibling instance and state
         path, without needing a real on-disk defs tree / `context.load_component` resolution.
         """
-        merged = read_cube_state(state_path)
+        # `sibling` was only *loaded* (via context.load_component or a direct constructor in
+        # tests) -- its own build_defs/build_defs_from_state has never run, so none of the
+        # state `get_cube_asset_spec`/`get_view_asset_spec` depend on exists on it yet. This
+        # populates it, entirely from the same cached state read below -- no live dbt project
+        # needed, and no separate call to the sibling's own build_defs required.
+        merged = sibling.prepare_state_aware_lookup(state_path)
         views = merged.get("views", [])
         resolved_cubes = resolve_extends(merged.get("cubes", []))
 
