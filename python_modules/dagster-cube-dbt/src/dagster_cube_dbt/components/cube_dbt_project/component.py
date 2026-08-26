@@ -427,29 +427,28 @@ class CubeDbtProjectComponent(DbtProjectComponent):
         merged = merge_documents(base, patches)
         write_cube_state(state_path, merged)
 
-    def build_defs_from_state(
-        self, context: dg.ComponentLoadContext, state_path: Path | None
-    ) -> dg.Definitions:
-        dbt_defs = super().build_defs_from_state(context, state_path)
+    def prepare_state_aware_lookup(self, state_path: Path | None) -> dict[str, Any]:
+        """Populates everything `get_cube_asset_spec`/`get_view_asset_spec`/
+        `_cube_asset_spec_by_name`/`_dbt_model_asset_key_or_none` need to resolve a cube/view's
+        identity and dependencies -- entirely from cached state, no live dbt project needed --
+        and returns the parsed `cube_dbt_state.json` content so callers don't need to read it
+        twice.
 
-        # `self.dbt_project` (and anything built on it, like `self.asset_key_for_model`) is
-        # dagster_dbt's own *live* lookup -- it always calls `self._project_manager.get_project(
-        # None)`, which for a real (non-`DbtProject`-literal) `project` config resolves straight
-        # to the *original* configured project directory, never the local copy `write_state_to_path`
-        # cached under `state_path`. Using it anywhere below, at deploy time, would require that
-        # original directory to still exist on disk -- exactly the assumption a state-backed
-        # component exists to avoid. `super().build_defs_from_state` above already gets this
-        # right internally (`get_project(state_path)`); recompute the same state-aware
-        # project/manifest ourselves so nothing below -- `_dbt_model_asset_key_or_none`, the
-        # generated op's `name`/`pool`, the sensor's `name` -- ever falls through to the live
-        # lookup instead.
+        Called by `build_defs_from_state` for this component's own defs, and by
+        `CubeSupersetSyncComponent` on a *sibling* instance obtained via
+        `context.load_component` -- which loads and resolves a component but never calls
+        `build_defs`/`build_defs_from_state` on it (that's a separate step), so without this,
+        calling `get_view_asset_spec` on that sibling instance directly would raise: none of
+        this state would have been populated on it yet. A real regression the first time this
+        was tried -- caught by `CubeSupersetSyncComponent`'s own test suite, not by anything in
+        this file's.
+        """
         state_aware_project = self._project_manager.get_project(state_path)
         self._state_aware_manifest = validate_manifest(state_aware_project.manifest_path)
         self._state_aware_project = state_aware_project
 
         merged = read_cube_state(state_path)
         cubes = merged.get("cubes", [])
-        views = merged.get("views", [])
         # {cube_name: dbt_model_name} for cubes renamed via `meta.cube.name`/`suffix` -- not
         # part of Cube's own schema (see generate_cubes' docstring), so never written to the
         # real promoted YAML; only used below to resolve the correct dbt model dependency.
@@ -491,7 +490,23 @@ class CubeDbtProjectComponent(DbtProjectComponent):
         # consistently everywhere the cube is referenced, not just to its own top-level spec.
         self._cube_dicts_by_name = augmented_cubes_by_name
         self._cube_spec_cache: dict[str, dg.AssetSpec] = {}
-        cube_names = list(augmented_cubes_by_name)
+        return merged
+
+    def build_defs_from_state(
+        self, context: dg.ComponentLoadContext, state_path: Path | None
+    ) -> dg.Definitions:
+        dbt_defs = super().build_defs_from_state(context, state_path)
+
+        # See prepare_state_aware_lookup's own docstring for why this (not self.dbt_project /
+        # self.asset_key_for_model, dagster_dbt's own *live* lookups) is what everything below
+        # -- _dbt_model_asset_key_or_none, the generated op's name/pool, the sensor's name --
+        # must go through instead.
+        merged = self.prepare_state_aware_lookup(state_path)
+        state_aware_project = self._state_aware_project
+        cubes = merged.get("cubes", [])
+        views = merged.get("views", [])
+
+        cube_names = list(self._cube_dicts_by_name)
         cube_specs = [self._cube_asset_spec_by_name(name) for name in cube_names]
         view_specs = [self.get_view_asset_spec(view) for view in views]
         specs = cube_specs + view_specs
@@ -680,16 +695,40 @@ class CubeDbtProjectComponent(DbtProjectComponent):
         cube assets the view is composed of (its own `cubes:` list) -- a real dependency,
         unlike a cube's query-time `joins`. Override this in a subclass to customize view
         assets.
+
+        A member's `join_path` is a dot-separated chain of cube names (e.g.
+        `"orders.customers"`), not necessarily a single cube -- Cube itself uses this to
+        express "reach `customers`'s members by joining through `orders`." The cube whose
+        members that entry's `includes`/`excludes` actually apply to (and therefore the real
+        dependency) is the *last* segment, not the first -- a real production view (multiple
+        `join_path` entries chained off one fact cube, e.g. `"fact.dates"`/`"fact.times"`)
+        broke an earlier version of this that took the first segment instead, silently
+        collapsing every multi-hop member onto just the fact cube and dropping the rest.
+
+        Each dependency is resolved through `self._cube_asset_spec_by_name` -- never
+        `self.asset_key_for_cube` directly -- for the same override-safety reason
+        `get_cube_asset_spec`'s own `extends` dependency is: a subclass renaming a cube's `key`
+        must still be reflected here, or the view ends up depending on an asset key that no
+        longer exists in the graph at all.
         """
         name = view["name"]
         member_cube_names = {
-            str(member["join_path"]).split(".")[0]
+            str(member["join_path"]).split(".")[-1]
             for member in view.get("cubes", [])
             if "join_path" in member
         }
+        deps = []
+        for member_name in sorted(member_cube_names):
+            if member_name not in self._cube_dicts_by_name:
+                raise dg.DagsterInvalidDefinitionError(
+                    f"View {name!r} references cube {member_name!r} (via a join_path) that "
+                    "wasn't generated -- check for a typo, or that the cube isn't excluded by "
+                    "cube_select."
+                )
+            deps.append(self._cube_asset_spec_by_name(member_name).key)
         return dg.AssetSpec(
             key=self.asset_key_for_view(name),
-            deps=[self.asset_key_for_cube(member_name) for member_name in sorted(member_cube_names)],
+            deps=deps,
             description=view.get("description"),
             metadata=_yaml_metadata(view),
             code_version=_code_version(view),

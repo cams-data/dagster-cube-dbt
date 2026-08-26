@@ -431,6 +431,69 @@ def test_cube_and_view_assets_are_virtual_and_freshness_looks_through_them(tmp_p
     assert asset_graph.get_non_virtual_ancestor_keys(exchange_rates_key) == set()
 
 
+def test_get_view_asset_spec_depends_on_the_last_segment_of_a_multi_hop_join_path(tmp_path, defs_dir):
+    """Regression test for a real production bug: a view member's `join_path` is a
+    dot-separated chain of cube names (e.g. `"journey_samples.dates"`, meaning "reach `dates`
+    by joining through `journey_samples`"), not necessarily a single cube. The dependency
+    belongs on the *last* segment (the cube whose members are actually being included), not
+    the first -- an earlier version of `get_view_asset_spec` took the first segment instead,
+    which for a real view chaining several members off one fact cube (e.g. `"fact.dates"`,
+    `"fact.times"`, `"fact.routes"`) silently collapsed every one of them onto just the fact
+    cube, dropping the dimension cubes' dependencies entirely.
+    """
+    component = _make_component(defs_dir)
+    state_path = tmp_path / "state"
+    component.write_state_to_path(state_path)
+
+    state_file = state_path.parent / CUBE_STATE_FILENAME
+    merged = json.loads(state_file.read_text())
+    for view in merged["views"]:
+        if view["name"] == "journeys_overview":
+            # "dates" is a real generated cube (see ALL_GENERATED_CUBE_NAMES), reachable from
+            # journey_samples via its own `joins:` -- a realistic multi-hop join_path.
+            view["cubes"].append({"join_path": "journey_samples.dates", "includes": "*"})
+    state_file.write_text(json.dumps(merged))
+
+    context = dg.ComponentTree.for_test().load_context
+    defs = _with_promoter(component.build_defs_from_state(context, state_path), NoopCubeFilePromoter())
+    asset_graph = defs.resolve_asset_graph()
+
+    view_key = component.asset_key_for_view("journeys_overview")
+    dates_key = component.asset_key_for_cube("dates")
+    assert dates_key in asset_graph.get(view_key).parent_keys
+
+
+def test_get_view_asset_spec_respects_a_subclass_renaming_a_member_cubes_key(tmp_path, defs_dir):
+    """Regression test for the same class of bug DECISIONS.md Phase 37/40 already fixed twice
+    elsewhere in this codebase: a view's dependency on its member cubes must be resolved
+    through the sibling cube's own overridable `get_cube_asset_spec`, never
+    `asset_key_for_cube` directly -- otherwise a subclass renaming cube keys (a real production
+    override, see Phase 40) leaves the view depending on an asset key that no longer exists in
+    the graph at all.
+    """
+
+    class RenamingComponent(CubeDbtProjectComponent):
+        def get_cube_asset_spec(self, cube):
+            base_spec = super().get_cube_asset_spec(cube)
+            return base_spec.replace_attributes(key=dg.AssetKey(f"{cube['name']}_cube"))
+
+    project = DbtProject(project_dir=FIXTURE_DBT_PROJECT, target=DBT_TARGET)
+    component = RenamingComponent(project=project, cube_select=CubeSelect(paths=["marts"]))
+    component._defs_dir = defs_dir
+    state_path = tmp_path / "state"
+    component.write_state_to_path(state_path)
+
+    context = dg.ComponentTree.for_test().load_context
+    defs = _with_promoter(component.build_defs_from_state(context, state_path), NoopCubeFilePromoter())
+    asset_graph = defs.resolve_asset_graph()
+
+    view_key = component.asset_key_for_view("journeys_overview")
+    assert asset_graph.get(view_key).parent_keys == {
+        dg.AssetKey("journey_samples_cube"),
+        dg.AssetKey("destination_locations_cube"),
+    }
+
+
 def test_get_cube_asset_spec_sees_extends_resolved_fields(tmp_path, defs_dir):
     """A cube introduced via a patch that `extends` another cube should have the parent's
     fields (here, `journey_samples`' dbt-sourced `description`) reflected in its own
