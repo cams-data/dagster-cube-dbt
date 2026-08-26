@@ -29,6 +29,7 @@ from dagster_cube_dbt.components.cube_dbt_project.component import (
 )
 from dagster_cube_dbt.cube_state import read_cube_state
 from dagster_cube_dbt.merge import resolve_extends
+from dagster_cube_dbt.superset_resource import SupersetResource
 
 SUPERSET_DATASET_KEY_PREFIX = "superset_dataset"
 
@@ -121,31 +122,53 @@ class CubeSupersetSyncComponent(dg.Component, dg.Resolvable):
     no live dbt project needed at deploy time, and no `project:`/`cube_select:`/merge-patch
     config duplicated here. See this module's docstring for the full rationale.
 
-    Requires a `SupersetResource` bound under `superset_resource_key` (`superset` by default)
-    and a Superset database connection named `database_name` (`"Cube"` by default) already
-    pointed at Cube's own SQL API -- this component doesn't create that connection, the same
-    way `CubeDbtProjectComponent` doesn't provision a running Cube instance.
+    Needs a `SupersetResource` and a Superset database connection named `database_name`
+    (`"Cube"` by default) already pointed at Cube's own SQL API -- this component doesn't
+    create that connection, the same way `CubeDbtProjectComponent` doesn't provision a running
+    Cube instance. Two ways to provide the resource, chosen by whether `base_url` is set:
 
-        # defs.yaml
-        type: dagster_cube_dbt.CubeSupersetSyncComponent
-        attributes:
-          dbt_cube_component: "../dbt_ingest"
+    - **Set `base_url` (and `username`/`password`)** and this component builds and owns a
+      `SupersetResource` itself, directly from these attributes -- the common case, since
+      there's only one real `SupersetResource` implementation:
 
-        # e.g. defs/resources.py
-        import dagster as dg
-        from dagster_cube_dbt import SupersetResource
+            # defs.yaml
+            type: dagster_cube_dbt.CubeSupersetSyncComponent
+            attributes:
+              dbt_cube_component: "../dbt_ingest"
+              base_url: "https://superset.example.com"
+              username: "{{ env.SUPERSET_USERNAME }}"
+              password: "{{ env.SUPERSET_PASSWORD }}"
 
-        @dg.definitions
-        def resources():
-            return dg.Definitions(
-                resources={
-                    "superset": SupersetResource(
-                        base_url="https://superset.example.com",
-                        username=dg.EnvVar("SUPERSET_USERNAME"),
-                        password=dg.EnvVar("SUPERSET_PASSWORD"),
-                    )
-                }
-            )
+    - **Leave `base_url` unset** and this falls back to looking up a `SupersetResource` bound
+      under `superset_resource_key` (`"superset"` by default) as an ordinary Dagster resource --
+      for a test double, or one instance shared across multiple components:
+
+            # defs.yaml
+            type: dagster_cube_dbt.CubeSupersetSyncComponent
+            attributes:
+              dbt_cube_component: "../dbt_ingest"
+
+            # e.g. defs/resources.py
+            import dagster as dg
+            from dagster_cube_dbt import SupersetResource
+
+            @dg.definitions
+            def resources():
+                return dg.Definitions(
+                    resources={
+                        "superset": SupersetResource(
+                            base_url="https://superset.example.com",
+                            username=dg.EnvVar("SUPERSET_USERNAME"),
+                            password=dg.EnvVar("SUPERSET_PASSWORD"),
+                        )
+                    }
+                )
+
+      `superset_resource_key` currently still defaults to `"superset"` for backwards
+      compatibility; a future release will remove that default, requiring it to be set
+      explicitly whenever this external-resource path is what you actually want, so an
+      incomplete `base_url`-less, `superset_resource_key`-less config is unambiguously reported
+      as *missing configuration* rather than a *missing resource*.
 
     Views only, not cubes -- Cube's own convention is that views are the intended BI-facing
     query layer. Reuses `GENERATED_ASSET_AUTOMATION_CONDITION`: a dataset only needs updating
@@ -164,11 +187,32 @@ class CubeSupersetSyncComponent(dg.Component, dg.Resolvable):
         str,
         Resolver.default(description="Name of the Superset database connection pointed at Cube's SQL API."),
     ] = field(default="Cube", kw_only=True)
+    base_url: Annotated[
+        str | None,
+        Resolver.default(
+            description="Superset deployment's base URL. Setting this (with username and "
+            "password) means this component builds and owns its own SupersetResource "
+            "directly, instead of looking up one bound under superset_resource_key.",
+        ),
+    ] = field(default=None, kw_only=True)
+    username: Annotated[
+        str | None,
+        Resolver.default(description="Superset username. Required whenever base_url is set."),
+    ] = field(default=None, kw_only=True)
+    password: Annotated[
+        str | None,
+        Resolver.default(
+            description="Superset password. Required whenever base_url is set -- use "
+            "'{{ env.SOME_VAR }}' templating rather than a literal value in checked-in "
+            "defs.yaml.",
+        ),
+    ] = field(default=None, kw_only=True)
     superset_resource_key: Annotated[
         str,
         Resolver.default(
-            description="Resource key of the SupersetResource this component syncs through -- "
-            "bound like any other Dagster resource, doesn't need to be declared in this defs.yaml.",
+            description="Resource key of the SupersetResource this component syncs through, "
+            "when base_url is left unset -- bound like any other Dagster resource, doesn't "
+            "need to be declared in this defs.yaml.",
         ),
     ] = field(default="superset", kw_only=True)
     sync_pool: Annotated[
@@ -180,6 +224,27 @@ class CubeSupersetSyncComponent(dg.Component, dg.Resolvable):
             "syncing the same Superset dataset concurrently turns out to be a problem.",
         ),
     ] = field(default=None, kw_only=True)
+
+    def build_managed_resource(self) -> SupersetResource | None:
+        """Returns a `SupersetResource` built directly from `base_url`/`username`/`password` if
+        `base_url` is set (the component-managed path), `None` if it's unset (the caller should
+        fall back to `superset_resource_key` instead). Raises clearly, rather than deferring to
+        a confusing `pydantic` error, if `base_url` is set but `username`/`password` aren't --
+        that combination unambiguously means the user intended the managed path but didn't
+        finish configuring it, not that they meant the external-resource path instead.
+        """
+        if self.base_url is None:
+            return None
+        missing = [name for name in ("username", "password") if getattr(self, name) is None]
+        if missing:
+            raise dg.DagsterInvalidDefinitionError(
+                "base_url is set, which means this component should build and manage its own "
+                f"SupersetResource directly, but {' and '.join(missing)} "
+                f"{'is' if len(missing) == 1 else 'are'} missing. Set base_url, username, and "
+                "password together, or remove base_url entirely (and set superset_resource_key) "
+                "to bind an existing SupersetResource externally instead."
+            )
+        return SupersetResource(base_url=self.base_url, username=self.username, password=self.password)
 
     def build_defs(self, context: dg.ComponentLoadContext) -> dg.Definitions:
         sibling = context.load_component(self.dbt_cube_component, CubeDbtProjectComponent)
@@ -215,7 +280,8 @@ class CubeSupersetSyncComponent(dg.Component, dg.Resolvable):
         view_name_by_key = {spec.key: view["name"] for view, spec in zip(views, specs)}
         views_by_name = {view["name"]: view for view in views}
 
-        required_resource_keys = {self.superset_resource_key}
+        managed_resource = self.build_managed_resource()
+        required_resource_keys = set() if managed_resource is not None else {self.superset_resource_key}
 
         @dg.multi_asset(
             specs=specs,
@@ -225,7 +291,7 @@ class CubeSupersetSyncComponent(dg.Component, dg.Resolvable):
             pool=self.sync_pool or _sync_pool_name(self.dbt_cube_component),
         )
         def _superset_dataset_assets(context: dg.AssetExecutionContext):
-            superset = getattr(context.resources, self.superset_resource_key)
+            superset = managed_resource or getattr(context.resources, self.superset_resource_key)
             for spec in specs:
                 if spec.key not in context.selected_asset_keys:
                     continue

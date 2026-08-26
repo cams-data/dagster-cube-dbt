@@ -8,6 +8,7 @@ logic rather than the YAML-loading plumbing.
 import json
 import shutil
 from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 import dagster as dg
 import pytest
@@ -21,7 +22,7 @@ from dagster_cube_dbt.components.cube_dbt_project.component import (
     CubeLandingCheck,
     CubeSelect,
 )
-from dagster_cube_dbt.landing_check import LANDING_CHECK_META_KEY, CubeApiClient
+from dagster_cube_dbt.landing_check import LANDING_CHECK_META_KEY, CubeApiClient, CubeRestApiClient
 from dagster_cube_dbt.output import read_entities
 from dagster_cube_dbt.resources import CubeFilePromoter, LocalFileCubeFilePromoter
 from dbt_engine import DBT_TARGET
@@ -910,6 +911,72 @@ def test_landing_check_timeout_fails_the_run_with_no_materializations(tmp_path, 
 
     assert not result.success
     assert result.asset_materializations_for_node(f"{component.dbt_project.name}_cubes") == []
+
+
+def test_cube_landing_check_build_managed_client_returns_none_without_api_url():
+    assert CubeLandingCheck().build_managed_client() is None
+
+
+def test_cube_landing_check_build_managed_client_builds_a_rest_api_client():
+    client = CubeLandingCheck(api_url="https://example.com", api_token="tok").build_managed_client()
+    assert isinstance(client, CubeRestApiClient)
+    assert client.api_url == "https://example.com"
+    assert client.api_token == "tok"
+
+
+def test_cube_landing_check_build_managed_client_raises_when_api_token_missing():
+    with pytest.raises(dg.DagsterInvalidDefinitionError, match="api_token"):
+        CubeLandingCheck(api_url="https://example.com").build_managed_client()
+
+
+def test_landing_check_managed_mode_needs_no_external_cube_api_client_resource_bound(tmp_path, defs_dir):
+    """Setting `api_url`/`api_token` means the component builds its own `CubeRestApiClient` --
+    the multi-asset op's `required_resource_keys` must not demand anything bound under
+    `resource_key` in that case, or every project using the managed path would also have to
+    bind a pointless resource under a key nothing actually reads.
+    """
+    component = _make_component(
+        defs_dir,
+        landing_check=CubeLandingCheck(
+            api_url="https://example.com",
+            api_token="tok",
+            timeout_seconds=5.0,
+            poll_interval_seconds=0.01,
+        ),
+    )
+    state_path = tmp_path / "state"
+    component.write_state_to_path(state_path)
+
+    context = dg.ComponentTree.for_test().load_context
+    built_defs = component.build_defs_from_state(context, state_path)
+
+    cube_key = component.asset_key_for_cube("journey_samples")
+    cubes_assets_def = next(
+        a for a in built_defs.assets if isinstance(a, dg.AssetsDefinition) and cube_key in a.keys
+    )
+    expected_code_version = cubes_assets_def.get_asset_spec(cube_key).code_version
+
+    output_dir = tmp_path / "cubes"
+    promoter = LocalFileCubeFilePromoter(output_dir=str(output_dir))
+    # Only `cube_file_promoter` bound -- no `cube_api_client` resource at all, proving the op
+    # doesn't require one when it's managing its own CubeRestApiClient directly.
+    defs = _with_promoter(built_defs, promoter)
+
+    mock_response = MagicMock()
+    mock_response.json.return_value = {
+        "cubes": [
+            {
+                "name": "journey_samples",
+                "meta": {LANDING_CHECK_META_KEY: {"code_version": expected_code_version}},
+            }
+        ]
+    }
+    with patch("dagster_cube_dbt.landing_check.requests.get", return_value=mock_response):
+        result = defs.resolve_implicit_global_asset_job_def().execute_in_process(
+            asset_selection=[cube_key]
+        )
+
+    assert result.success
 
 
 def _cube_multi_asset_op(defs: dg.Definitions, dbt_project_name: str) -> dg.OpDefinition:
