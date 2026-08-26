@@ -20,7 +20,7 @@ from typing import Any
 
 import dagster as dg
 import requests
-from pydantic import PrivateAttr
+from pydantic import PrivateAttr, model_validator
 
 # Fields Superset computes/manages itself and returns on a GET, but that a PUT must not echo
 # back verbatim (rejected or silently reset) -- confirmed against the reference implementation.
@@ -41,9 +41,23 @@ class SupersetResource(dg.ConfigurableResource):
     `sync_dataset` is called once per synced view, and re-logging-in for every one of
     potentially dozens of views would be wasteful.
 
-    `password` is a plain `str` config field, the same pattern `CubeRestApiClient.api_token`
-    uses -- bind it from wherever your project already manages secrets (e.g.
-    `EnvVar("SUPERSET_PASSWORD")`), not a literal value in checked-in `defs.yaml`.
+    Two ways to authenticate, chosen by which fields are set:
+
+    - **`username`/`password`** -- plain `str` config fields, the same pattern
+      `CubeRestApiClient.api_token` uses -- bind them from wherever your project already
+      manages secrets (e.g. `EnvVar("SUPERSET_PASSWORD")`), not literal values in checked-in
+      `defs.yaml`. Exchanged for a session access token via `POST /api/v1/security/login`
+      (`provider: "db"`) once per resource instance, then cached -- not once per dataset.
+    - **`api_key`** -- a Superset API key (see
+      https://superset.apache.org/admin-docs/security/#api-key-authentication; disabled by
+      default, needs `FAB_API_KEY_ENABLED = True` in Superset's own `superset_config.py`, and
+      requires an account whose auth provider isn't `db` login, e.g. LDAP/OIDC SSO, since those
+      accounts have no password this resource could log in with anyway). Used directly as the
+      `Authorization: Bearer` token -- no login call made at all.
+
+    Set one or the other, not both. There's currently no support for driving the interactive
+    OIDC/SSO login flow itself (only for using an API key from an SSO-authenticated account, per
+    above) -- that would need a real OIDC client credentials exchange, not just a config field.
 
     Doesn't create the underlying Superset database *connection* (the one pointed at Cube's SQL
     API) -- `database_name` (passed to `sync_dataset`) must already exist in Superset, set up
@@ -60,14 +74,30 @@ class SupersetResource(dg.ConfigurableResource):
     """
 
     base_url: str
-    username: str
-    password: str
+    username: str | None = None
+    password: str | None = None
+    api_key: str | None = None
     verify_tls: bool = True
     refresh_timeout_seconds: float = 30.0
     refresh_poll_interval_seconds: float = 1.0
 
     _session: requests.Session = PrivateAttr(default_factory=requests.Session)
     _authenticated: bool = PrivateAttr(default=False)
+
+    @model_validator(mode="after")
+    def _check_auth_config(self) -> "SupersetResource":
+        has_api_key = self.api_key is not None
+        has_password_auth = self.username is not None or self.password is not None
+        if has_api_key and has_password_auth:
+            raise ValueError(
+                "Set either api_key OR username+password, not both -- SupersetResource "
+                "authenticates one way or the other, not both at once."
+            )
+        if not has_api_key and (self.username is None or self.password is None):
+            raise ValueError(
+                "SupersetResource needs either api_key, or both username and password."
+            )
+        return self
 
     def _url(self, path: str) -> str:
         return f"{self.base_url.rstrip('/')}{path}"
@@ -80,18 +110,23 @@ class SupersetResource(dg.ConfigurableResource):
         self._session.verify = self.verify_tls
         if self._authenticated:
             return
-        login_response = self._session.post(
-            self._url("/api/v1/security/login"),
-            json={
-                "username": self.username,
-                "password": self.password,
-                "provider": "db",
-                "refresh": True,
-            },
-        )
-        login_response.raise_for_status()
-        access_token = login_response.json()["access_token"]
-        self._session.headers["Authorization"] = f"Bearer {access_token}"
+
+        if self.api_key is not None:
+            # API keys are already bearer tokens -- no login call needed, just use it directly.
+            self._session.headers["Authorization"] = f"Bearer {self.api_key}"
+        else:
+            login_response = self._session.post(
+                self._url("/api/v1/security/login"),
+                json={
+                    "username": self.username,
+                    "password": self.password,
+                    "provider": "db",
+                    "refresh": True,
+                },
+            )
+            login_response.raise_for_status()
+            access_token = login_response.json()["access_token"]
+            self._session.headers["Authorization"] = f"Bearer {access_token}"
 
         csrf_response = self._session.get(self._url("/api/v1/security/csrf_token/"))
         csrf_response.raise_for_status()
