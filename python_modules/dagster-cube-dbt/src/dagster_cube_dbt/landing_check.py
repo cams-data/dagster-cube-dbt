@@ -20,7 +20,6 @@ has landed.
 """
 
 import time
-from abc import ABC, abstractmethod
 from collections.abc import Mapping
 from typing import Any
 
@@ -46,25 +45,13 @@ def with_landing_check_meta(entity: Mapping[str, Any], code_version: str) -> dic
     return entity
 
 
-class CubeApiClient(dg.ConfigurableResource, ABC):
-    """Base resource for reading back Cube's own live schema. `CubeRestApiClient` is the
-    concrete HTTP implementation talking to a real Cube deployment; a test double can subclass
-    this directly (see `fetch_meta`'s docstring for the expected response shape) to exercise
-    the landing-check polling logic without a real Cube instance.
-    """
-
-    @abstractmethod
-    def fetch_meta(self) -> dict[str, Any]:
-        """Returns Cube's full `/v1/meta` response, deserialized from JSON: a dict with a
-        `"cubes"` key (Cube's own REST API groups cubes *and* views under this one key,
-        distinguished by a `"type"` field) holding a list of `{"name": ..., "meta": {...},
-        ...}` entries.
-        """
-        ...
-
-
-class CubeRestApiClient(CubeApiClient):
-    """Talks to a real Cube deployment's REST API.
+class CubeRestApiClient(dg.ConfigurableResource):
+    """Talks to a real Cube deployment's REST API -- the one way this library reads back Cube's
+    own live schema. Not an abstract base with pluggable implementations (unlike
+    `CubeFilePromoter`, which genuinely has several -- local file, git, ...) -- there's no
+    second real way to ask a Cube deployment what it currently has loaded, and Python's own
+    duck typing means a test double for `fetch_meta` never needed a formal base class to
+    substitute for this at all (see `test_landing_check.py`).
 
     `api_token` is sent verbatim in the `Authorization` header -- Cube's REST API takes a bare
     token there, not a `Bearer <token>` scheme (confirmed against Cube's own auth docs),
@@ -88,6 +75,12 @@ class CubeRestApiClient(CubeApiClient):
     verify_tls: bool = True
 
     def fetch_meta(self) -> dict[str, Any]:
+        """Returns Cube's full `/v1/meta` response, deserialized from JSON: a dict with a
+        `"cubes"` key (Cube's own REST API groups cubes *and* views under this one key,
+        distinguished by a `"type"` field) holding a list of `{"name": ..., "meta": {...},
+        ...}` entries. Raises `requests.HTTPError` on a non-2xx response -- `wait_for_landing`
+        is what decides whether that's worth retrying.
+        """
         response = requests.get(
             f"{self.api_url.rstrip('/')}/meta",
             headers={"Authorization": self.api_token},
@@ -99,7 +92,7 @@ class CubeRestApiClient(CubeApiClient):
 
 
 def wait_for_landing(
-    client: CubeApiClient,
+    client: CubeRestApiClient,
     expected_code_versions: Mapping[str, str],
     timeout_seconds: float,
     poll_interval_seconds: float,
@@ -112,26 +105,53 @@ def wait_for_landing(
     contract `CubeFilePromoter.promote` documents). Since the underlying asset's `code_version`
     is left unchanged by a failed run, the next automation evaluation just retries the whole
     promote-then-poll cycle.
+
+    A `/meta` request failing outright (not just returning stale content) is itself expected
+    during a promotion: a `git-sync`-style sidecar loading a bad file makes Cube start serving
+    500s for its *own* schema until a fix propagates, and the window right after that fix lands
+    is exactly when this poll is running. A 5xx response, or the request failing to complete at
+    all (connection refused, timeout -- Cube mid-restart), is treated the same as "not landed
+    yet" and retried; a 4xx response (bad `api_url`, an invalid/expired `api_token`) is a
+    permanent misconfiguration that more polling won't fix, so it's raised immediately rather
+    than only surfacing once `timeout_seconds` runs out.
     """
     pending = dict(expected_code_versions)
     deadline = time.monotonic() + timeout_seconds
+    last_error: Exception | None = None
 
     while True:
-        response = client.fetch_meta()
-        landed = {
-            entry["name"]: (entry.get("meta") or {}).get(LANDING_CHECK_META_KEY, {}).get("code_version")
-            for entry in response.get("cubes", [])
-        }
-        pending = {
-            name: code_version
-            for name, code_version in pending.items()
-            if landed.get(name) != code_version
-        }
-        if not pending:
-            return
+        try:
+            response = client.fetch_meta()
+        except requests.HTTPError as error:
+            status_code = error.response.status_code if error.response is not None else None
+            if status_code is None or not (500 <= status_code < 600):
+                raise
+            last_error = error
+        except requests.RequestException as error:
+            # Connection errors, timeouts, etc. -- the request never completed at all, as
+            # plausibly transient as a 5xx (Cube mid-restart, a brief network blip), not a
+            # permanent misconfiguration either.
+            last_error = error
+        else:
+            landed = {
+                entry["name"]: (entry.get("meta") or {}).get(LANDING_CHECK_META_KEY, {}).get("code_version")
+                for entry in response.get("cubes", [])
+            }
+            pending = {
+                name: code_version
+                for name, code_version in pending.items()
+                if landed.get(name) != code_version
+            }
+            if not pending:
+                return
+            last_error = None  # a successful-but-not-yet-matching poll supersedes any earlier error
+
         if time.monotonic() >= deadline:
-            raise dg.Failure(
+            message = (
                 "Timed out waiting for the following cube/view(s) to land in Cube (promoted "
                 f"content not yet visible via the Cube REST API): {sorted(pending)}"
             )
+            if last_error is not None:
+                message += f" -- last error while polling: {last_error!r}"
+            raise dg.Failure(message)
         time.sleep(poll_interval_seconds)
