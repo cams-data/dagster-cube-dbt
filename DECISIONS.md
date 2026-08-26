@@ -2846,3 +2846,80 @@ anything Superset-specific landed), `SupersetResource`, `CubeSupersetSyncCompone
   behavior against small hand-built dicts (not coupled to the shared fixture project's exact
   shape).
 - Full suite: **130/130 passed** (110 + 9 resource unit tests + 11 component tests).
+
+## Phase 44 -- component-managed resources for `landing_check` and `CubeSupersetSyncComponent`
+
+The user asked a design question after testing the Superset sync feature: `CubeFilePromoter`
+being externally-bound (a resource the user constructs and binds under a key, rather than the
+component building it from config) was a deliberate choice -- but `CubeApiClient`/
+`CubeRestApiClient` (`landing_check`) and `SupersetResource` don't share the reason that choice
+was made for `CubeFilePromoter` (a genuine `ABC` with several real destination-specific
+implementations, needing runtime credentials the component author can't anticipate), so should
+they be handled differently?
+
+### Decision
+
+Yes -- confirmed against real precedent, not just general Dagster style, before agreeing: `dagster_dbt.DbtProjectComponent` itself constructs its own `DbtCliResource(project)` directly
+from its own attributes, rather than requiring one bound externally -- the base class this
+project already extends already does exactly what was proposed. Dagster's own `Component`
+docstring's canonical example (`DatabaseTableComponent`) does the same (`database_url: str` as
+a plain attribute). The real distinguishing question is "genuine extension point, or config for
+one canonical implementation?" -- `CubeFilePromoter` is the former, `CubeApiClient`/
+`SupersetResource` are the latter (the former's `ABC`-ness exists mainly as a testing seam, not
+user-facing pluggability, per Phase 39).
+
+Implemented for both, with a single rule the user specified: if the inline connection fields
+are set (`landing_check.api_url`, `CubeSupersetSyncComponent.base_url`), the component builds
+and owns the resource itself; if not, it falls back to the existing external-resource-by-key
+behavior, unchanged -- a fully backwards-compatible, additive change (no `BREAKING CHANGE`
+footer needed, no forced major/minor bump beyond a normal `feat:`).
+
+- `CubeLandingCheck` gained `api_url`/`api_token`/`verify_tls` fields and a
+  `build_managed_client()` method: returns `None` (fall back to `resource_key`) if `api_url`
+  isn't set; builds a `CubeRestApiClient` directly if both `api_url` and `api_token` are set;
+  raises a clear `DagsterInvalidDefinitionError` (not a confusing raw `pydantic` error) if
+  `api_url` is set but `api_token` isn't -- that combination unambiguously means the managed
+  path was intended but left incomplete, not that the external-resource path was meant instead.
+- `CubeSupersetSyncComponent` gained the mirrored `base_url`/`username`/`password` fields and
+  `build_managed_resource()`, same shape: `None` without `base_url`, a built `SupersetResource`
+  with all three set, a clear error if `base_url` is set but `username`/`password` aren't.
+- In both components' op-building code, `required_resource_keys` now conditionally excludes the
+  `resource_key`/`superset_resource_key` entry whenever the managed path is in play -- otherwise
+  every managed-mode project would still have to bind a pointless resource under a key nothing
+  actually reads, defeating the point. Verified this actually matters via revert-and-confirm-
+  fail (see Verification).
+- `resource_key`/`superset_resource_key` **keep their current defaults** (`"cube_api_client"`/
+  `"superset"`) for now, deliberately -- the user's own stated forward plan: a future release
+  removes those defaults, forcing anyone using the external-resource path to set the key
+  explicitly. Once that lands, an incomplete config with **no** managed-path fields set and
+  **no** explicit resource key becomes unambiguous: the user must have intended the managed
+  path (since external mode now requires an explicit opt-in key) but didn't finish configuring
+  it, so the right error becomes "missing configuration," not "missing resource." Not
+  implemented yet -- deliberately deferred, since removing a default *is* a breaking change
+  (unlike everything else in this phase), and doing it now would force exactly the kind of
+  semver bump this phase was scoped to avoid.
+
+### Verification
+
+- New tests in `test_component_integration.py` (4): `CubeLandingCheck.build_managed_client`
+  returns `None`/builds a real `CubeRestApiClient`/raises clearly when `api_token` is missing,
+  and an integration test proving the multi-asset op materializes successfully with `api_url`/
+  `api_token` set and **no** `cube_api_client` resource bound at all (mocking `requests.get`,
+  same pattern `test_landing_check.py` already uses).
+- New tests in `test_cube_superset_sync_component.py` (4): the mirrored `build_managed_resource`
+  unit tests, plus an integration test proving the dataset-sync op materializes successfully
+  with `base_url`/`username`/`password` set and **no** `superset` resource bound at all
+  (patching `SupersetResource.sync_dataset` directly, since the manually-constructed instance
+  isn't reachable through `context.resources`).
+- Both new "needs no external resource bound" tests confirmed to actually catch a regression:
+  temporarily made `required_resource_keys` unconditional again in each component, watched both
+  new tests fail with Dagster's own "resource ... was not provided" error, then restored the
+  fix.
+- Every existing test using the external-resource path (`resource_key`/`superset_resource_key`,
+  no inline fields set) passes unchanged -- confirms this is additive, not a behavior change for
+  anyone already using the library.
+- README updated for both features: two side-by-side `defs.yaml` examples (managed vs
+  external) per feature, plus a note that the resource-key defaults are staying for backwards
+  compatibility only for now.
+- `mkdocs build --strict` clean.
+- Full suite: **138/138 passed** (130 + 4 landing_check + 4 Superset sync).
