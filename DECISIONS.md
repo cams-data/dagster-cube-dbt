@@ -2846,3 +2846,32 @@ anything Superset-specific landed), `SupersetResource`, `CubeSupersetSyncCompone
   behavior against small hand-built dicts (not coupled to the shared fixture project's exact
   shape).
 - Full suite: **130/130 passed** (110 + 9 resource unit tests + 11 component tests).
+
+## Phase 43 -- documenting the Superset-side database connection setup
+
+The README's Superset section covered `CubeSupersetSyncComponent`/`SupersetResource` config but,
+by design, treated "a Superset database connection pointed at Cube's SQL API already exists" as
+a bare prerequisite -- same as `CubeFilePromoter`'s docs treat "a running Cube instance" as
+assumed. The user asked for the walkthrough anyway, correctly judging that Superset's own
+connection-string format for Cube's SQL API isn't something most users would already know
+(unlike "a Cube instance exists," which is self-evident to anyone using this library at all).
+
+Verified against Cube's own docs before writing anything down (`docs.cube.dev/reference/
+core-data-apis/sql-api`, fetched directly), not assumed from general Postgres-driver knowledge:
+`CUBEJS_PG_SQL_PORT` enables the SQL API on self-hosted Cube Core (off by default; Cube Cloud
+has it on already, port `5432`); auth is `CUBEJS_SQL_USER`/`CUBEJS_SQL_PASSWORD` (or a custom
+`checkSqlAuth`); the wire protocol is real Postgres, so Superset's own PostgreSQL engine
+connects directly, and the SQL-level "database" name in the connection string is an arbitrary
+string (`cube` is the convention, matching Cube's own example). One genuinely non-obvious
+gotcha worth calling out explicitly in the new section: `CubeSupersetSyncComponent.database_name`
+is looked up by the **Superset connection's own display name** (via Superset's REST API,
+`GET /api/v1/database/?q={"filters":[{"col":"database_name","opr":"eq","value":...}]}`) -- a
+completely different string from the SQL-level database name in the connection URI. Conflating
+the two would be an easy first-time mistake; naming the Superset connection exactly `"Cube"`
+(the component's own default) sidesteps needing to think about it at all.
+
+### Verification
+
+- `mkdocs build --strict` clean.
+- No code changes -- README-only addition, so no test suite re-run needed beyond the existing
+  130/130 baseline.

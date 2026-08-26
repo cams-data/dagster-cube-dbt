@@ -349,7 +349,39 @@ configuring datasets in Superset by hand.
 It's a separate component chained onto a `CubeDbtProjectComponent` via `context.load_component`
 — reading that component's already-generated, cached state directly — rather than a subclass,
 so `project:`/`cube_select:`/merge-patch config lives in exactly one `defs.yaml` block, not
-duplicated across two:
+duplicated across two.
+
+### Connecting Superset to Cube first
+
+This component doesn't create the underlying Superset **database connection** — set that up
+once, by hand, before configuring `CubeSupersetSyncComponent` itself:
+
+1. **Enable Cube's SQL API**, if it isn't already — it's off by default on self-hosted Cube
+   Core. Set `CUBEJS_PG_SQL_PORT` on your Cube deployment to the port you want it to listen on
+   (Cube Cloud has this on already, on port `5432`, from the deployment's Integrations page).
+   It speaks the real Postgres wire protocol, so any Postgres client — including Superset's own
+   PostgreSQL driver, and `psql` for a quick sanity check — can connect to it directly:
+   ```
+   PGPASSWORD=<CUBEJS_SQL_PASSWORD> psql -h <host> -p <CUBEJS_PG_SQL_PORT> -U <CUBEJS_SQL_USER> cube
+   ```
+   Authenticate with `CUBEJS_SQL_USER`/`CUBEJS_SQL_PASSWORD` (both env vars you set on the Cube
+   deployment — Cube Cloud defaults the user to `cube` and generates a password for you,
+   visible in its console), or your own `checkSqlAuth` implementation if you've configured
+   per-user SQL API auth. The database name in the connection is arbitrary — any string works
+   (`cube` is the conventional choice, used above and in Cube's own docs).
+2. **In Superset**: Data → Databases → **+ Database**, choose the **PostgreSQL** engine, and
+   give it a SQLAlchemy URI built from the same values:
+   ```
+   postgresql://<CUBEJS_SQL_USER>:<CUBEJS_SQL_PASSWORD>@<host>:<CUBEJS_PG_SQL_PORT>/cube
+   ```
+   Whatever **name** you give this connection in Superset's dialog is what `database_name`
+   (below) must match exactly — `SupersetResource` looks it up by that display name via
+   Superset's own REST API, not by anything in the connection string itself. `"Cube"` is this
+   component's own default, so naming the connection exactly `Cube` in Superset means you don't
+   need to set `database_name` at all.
+3. Every cube/view Cube generates shows up as a queryable table through this one connection —
+   there's no per-view Superset database to create; only per-view **datasets**, which is exactly
+   what `CubeSupersetSyncComponent` automates from here on.
 
 ```yaml
 # defs.yaml, e.g. defs/superset_sync/defs.yaml
