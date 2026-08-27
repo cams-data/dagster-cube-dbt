@@ -3213,3 +3213,19 @@ The user, past the auth fix from Phase 49, hit a real `400 Client Error: BAD REQ
 
 - Two new tests in `test_superset_resource.py`, against a real `requests.Response` (not the `_FakeResponse` test double, which stubs `raise_for_status()` as a no-op and only exercises success paths) -- confirmed the JSON body's actual error text lands in the raised message on a 4xx, and that a 2xx response still doesn't raise at all. Confirmed via revert-and-confirm-fail: temporarily reverted `_raise_for_status` to a bare `response.raise_for_status()`, watched the body-surfacing test fail with just the generic status line, restored it.
 - Full suite: **154/154 passed** (152 + 2 new tests).
+
+## Phase 51 -- `SupersetResource` sends a `Referer` header: Flask-WTF's HTTPS CSRF check needs one, separately from the CSRF token itself
+
+Phase 50's error-body fix paid off immediately: the same user's next retry showed exactly why the earlier 400 was happening -- `"400 Bad Request: The referrer header is missing."` (`error_type: GENERIC_BACKEND_ERROR`, issue code 1011). Not a guess this time, Superset's own error told us directly.
+
+### Decisions
+
+- Root cause is Flask-WTF's own CSRF protection, not Superset-specific: for any state-changing request over HTTPS, it checks the `Referer` header's origin against the request's own origin, *in addition to* validating the `X-CSRFToken` header -- two separate checks, and a correct CSRF token doesn't satisfy the Referer one. A plain `requests.Session` never sends a `Referer` header on its own the way a browser does, so every POST/PUT/DELETE this resource makes was failing this check, regardless of the CSRF token being fetched and set correctly.
+- This never showed up on `/api/v1/security/login` (also a POST) because Flask-AppBuilder marks the login view CSRF-exempt entirely -- there's no token to check yet at that point, so Flask-WTF's referrer check doesn't run there either. It only surfaces on the *first* mutating call after login, which for this resource is always `_create_dataset` (or the update call, for an existing dataset) -- exactly where the user's report landed.
+- Fix: set `self._session.headers["Referer"] = self.base_url` once, alongside the existing `verify_tls` assignment at the top of `_ensure_authenticated` (same reasoning as that one -- applies to every request through the session, needs setting exactly once, not per call site). Using `base_url` itself as the Referer is correct here: Flask-WTF's check only compares origins (scheme + host), not full paths, and `base_url` is definitionally the right origin for every request this resource makes.
+- Documented this in `SupersetResource`'s own docstring (a genuinely non-obvious dependency a future reader wouldn't guess from the code alone) -- didn't add anything to the README, since it's not a config knob a user needs to know about, just an internal request-flow detail that now works transparently.
+
+### Verification
+
+- One new test in `test_superset_resource.py`: `sync_dataset` sets `session.headers["Referer"]` to `base_url`. Confirmed via revert-and-confirm-fail: temporarily removed the header assignment, watched the test fail with a `KeyError` (no `Referer` key set at all), restored it.
+- Full suite: **155/155 passed** (154 + 1 new test).

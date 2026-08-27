@@ -147,6 +147,29 @@ def test_sync_dataset_reuses_an_existing_dataset_instead_of_creating_one():
     session.post.assert_called_once()  # login only -- no dataset creation
 
 
+def test_sync_dataset_sets_a_referer_header_matching_base_url():
+    """Regression test for a real production error: Flask-WTF's CSRF protection checks the
+    Referer header (separately from X-CSRFToken) on every state-changing HTTPS request, and a
+    plain requests.Session never sends one on its own -- without this, dataset creation/update
+    failed with "The referrer header is missing" even with a valid CSRF token attached.
+    """
+    session = MagicMock()
+    session.headers = {}
+    session.post.side_effect = [_login_response()]
+    session.get.side_effect = [
+        _csrf_response(),
+        _FakeResponse({"result": [{"id": 7}]}),
+        _FakeResponse({"result": [{"id": 99}]}),
+        _FakeResponse({"result": {"columns": [{"column_name": "amount"}], "metrics": []}}),
+    ]
+    session.put.side_effect = [_FakeResponse({}), _FakeResponse({"result": {}})]
+    resource = _resource_with_session(session)
+
+    resource.sync_dataset("Cube", "public", "orders_overview", [], [])
+
+    assert session.headers["Referer"] == "https://superset.example.com"
+
+
 def test_sync_dataset_verify_tls_defaults_to_true_on_the_session():
     session = MagicMock()
     session.post.side_effect = [_login_response()]

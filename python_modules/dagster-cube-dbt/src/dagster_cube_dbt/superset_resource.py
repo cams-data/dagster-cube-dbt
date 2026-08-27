@@ -72,6 +72,12 @@ class SupersetResource(dg.ConfigurableResource):
     OIDC/SSO login flow itself (only for using an API key from an SSO-authenticated account, per
     above) -- that would need a real OIDC client credentials exchange, not just a config field.
 
+    Sends a `Referer` header (set to `base_url`) on every request -- Flask-WTF's CSRF
+    protection checks it against the request's own origin for HTTPS state-changing requests,
+    separately from the `X-CSRFToken` header itself, and a plain `requests.Session` never sends
+    one on its own the way a browser would. Without it, every POST/PUT/DELETE past login fails
+    with "The referrer header is missing", regardless of how correct the CSRF token is.
+
     Doesn't create the underlying Superset database *connection* (the one pointed at Cube's SQL
     API) -- `database_name` (passed to `sync_dataset`) must already exist in Superset, set up
     once by hand, the same way `CubeDbtProjectComponent` assumes a running Cube instance already
@@ -121,6 +127,14 @@ class SupersetResource(dg.ConfigurableResource):
         # requests deep, and a per-call verify= would need repeating (and staying in sync)
         # everywhere `self._session` is used, not just here.
         self._session.verify = self.verify_tls
+        # Flask-WTF's CSRF protection checks the Referer header against the request's own
+        # origin for every state-changing HTTPS request -- separate from, and in addition to,
+        # the X-CSRFToken header below. A plain `requests.Session` never sends one on its own
+        # (unlike a browser), which fails that check with "The referrer header is missing" on
+        # any POST/PUT/DELETE, even with a valid CSRF token attached. Login is exempt from CSRF
+        # entirely (there's no token to check it against yet), which is why this only ever
+        # surfaces on the first mutating call after login -- e.g. dataset creation.
+        self._session.headers["Referer"] = self.base_url
         if self._authenticated:
             return
 
