@@ -288,6 +288,20 @@ GENERATED_ASSET_AUTOMATION_CONDITION = (
     & ~dg.AutomationCondition.in_progress()
 ).with_label("cube_code_version_changed")
 
+# Deliberately no bundled AutomationConditionSensorDefinition (and no tag to target one by) --
+# tried both a key-scoped sensor per component and a shared tag-scoped one across this
+# component and CubeSupersetSyncComponent (see DECISIONS.md), and backed both out. The
+# condition above still evaluates correctly under the platform's own default automation
+# condition sensor with zero setup; a bundled sensor only bought independent start/stop of
+# these assets' automation from the rest of a deployment, and a bundled *tag* is worse than
+# not bundling anything: any subclass overriding get_cube_asset_spec/get_view_asset_spec (a
+# fully legitimate, already-documented override point) without delegating through super()
+# builds a fresh AssetSpec with no idea our internal tag existed, silently dropping it from
+# whatever sensor was targeting it -- automation still runs correctly (via the default
+# sensor), just not through the custom one, which is a confusing thing to have to debug.
+# README's "Advanced: automation condition sensors" section shows how to set one up by hand,
+# for anyone who wants that independent control.
+
 
 @dataclass
 class CubeDbtProjectComponent(DbtProjectComponent):
@@ -591,21 +605,7 @@ class CubeDbtProjectComponent(DbtProjectComponent):
                 if spec.key in context.selected_asset_keys:
                     yield dg.MaterializeResult(asset_key=spec.key)
 
-        # A custom sensor scoped to just these assets, rather than relying on the platform's
-        # single default_automation_condition_sensor -- Dagster automatically excludes any
-        # asset targeted by an explicit AutomationConditionSensorDefinition from the default
-        # one, so this doesn't cause double evaluation. default_status=RUNNING because a
-        # custom sensor otherwise starts STOPPED (unlike the always-on default sensor), which
-        # would silently turn automation off for these assets until someone starts it by hand.
-        cube_sensor = dg.AutomationConditionSensorDefinition(
-            name=f"{state_aware_project.name}_cube_automation_condition_sensor",
-            target=dg.AssetSelection.assets(*[spec.key for spec in specs]),
-            default_status=dg.DefaultSensorStatus.RUNNING,
-        )
-
-        return dg.Definitions.merge(
-            dbt_defs, dg.Definitions(assets=[_cube_assets], sensors=[cube_sensor])
-        )
+        return dg.Definitions.merge(dbt_defs, dg.Definitions(assets=[_cube_assets]))
 
     @public
     def asset_key_for_cube(self, name: str) -> dg.AssetKey:

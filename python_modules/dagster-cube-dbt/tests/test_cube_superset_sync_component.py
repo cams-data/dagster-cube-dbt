@@ -102,32 +102,6 @@ def test_one_dataset_asset_spec_per_view(tmp_path, defs_dir):
     assert dataset_keys == {dataset_key}
 
 
-def test_build_defs_from_sibling_state_registers_a_sensor_targeting_every_dataset_asset(tmp_path, defs_dir):
-    """Regression test: a real bug the user found live -- these assets carry
-    `automation_condition=GENERATED_ASSET_AUTOMATION_CONDITION` on their specs, but without a
-    custom `AutomationConditionSensorDefinition` explicitly targeting them, they fell to the
-    platform's single default automation condition sensor instead, unlike the sibling
-    `CubeDbtProjectComponent`'s own cube/view assets (which already had one). Not a correctness
-    bug in the condition itself -- the default sensor still evaluates it correctly -- but these
-    assets couldn't be started/stopped/observed independently of every other
-    automation-condition asset in the deployment.
-    """
-    sibling = _make_sibling(defs_dir)
-    state_path = tmp_path / "state"
-    sibling.write_state_to_path(state_path)
-
-    context = dg.ComponentTree.for_test().load_context
-    defs = _with_superset(_make_sync_component().build_defs_from_sibling_state(context, sibling, state_path))
-
-    automation_sensors = [s for s in defs.sensors or [] if isinstance(s, dg.AutomationConditionSensorDefinition)]
-    assert len(automation_sensors) == 1
-    sensor = automation_sensors[0]
-    assert sensor.default_status == dg.DefaultSensorStatus.RUNNING
-    assert sensor.asset_selection.resolve(defs.resolve_asset_graph()) == {
-        dg.AssetKey(["superset_dataset", "journeys_overview"])
-    }
-
-
 def test_dataset_depends_on_the_sibling_view_asset_and_shares_its_code_version(tmp_path, defs_dir):
     sibling = _make_sibling(defs_dir)
     state_path = tmp_path / "state"

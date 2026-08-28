@@ -1296,32 +1296,6 @@ def test_generated_asset_automation_condition_does_not_fire_on_code_version_chan
     assert result.total_requested == 0
 
 
-def test_build_defs_from_state_registers_a_sensor_targeting_every_cube_and_view_asset(tmp_path, defs_dir):
-    """Regression test: without a custom `AutomationConditionSensorDefinition` explicitly
-    targeting these assets, they'd fall to the platform's single default automation condition
-    sensor instead -- which still evaluates their condition correctly, but means they can't be
-    started/stopped/observed independently of every other automation-condition asset in the
-    deployment. This never had direct test coverage before -- the exact same class of gap the
-    user separately caught live for `CubeSupersetSyncComponent`'s dataset assets.
-    """
-    component = _make_component(defs_dir)
-    state_path = tmp_path / "state"
-    component.write_state_to_path(state_path)
-
-    context = dg.ComponentTree.for_test().load_context
-    defs = _with_promoter(component.build_defs_from_state(context, state_path), NoopCubeFilePromoter())
-
-    automation_sensors = [s for s in defs.sensors or [] if isinstance(s, dg.AutomationConditionSensorDefinition)]
-    assert len(automation_sensors) == 1
-    sensor = automation_sensors[0]
-    assert sensor.default_status == dg.DefaultSensorStatus.RUNNING
-
-    expected_keys = {component.asset_key_for_cube(name) for name in ALL_GENERATED_CUBE_NAMES} | {
-        component.asset_key_for_view("journeys_overview")
-    }
-    assert sensor.asset_selection.resolve(defs.resolve_asset_graph()) == expected_keys
-
-
 def test_generated_asset_automation_condition_does_not_lose_a_code_version_change_while_blocked(
     tmp_path, defs_dir
 ):

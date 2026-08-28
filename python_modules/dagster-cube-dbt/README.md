@@ -127,14 +127,15 @@ when either the asset has never materialized (and its deps are ready) or its `co
 changes — not on every upstream data update:
 
 ```python
+deps_ready = ~AutomationCondition.any_deps_missing() & ~AutomationCondition.any_deps_in_progress()
+
 (
     (
-        AutomationCondition.missing()
-        & ~AutomationCondition.any_deps_missing()
-        & ~AutomationCondition.any_deps_in_progress()
-    ).newly_true().since_last_handled()
-    | AutomationCondition.code_version_changed()
-) & ~AutomationCondition.in_progress()
+        (AutomationCondition.missing() & deps_ready).newly_true().since_last_handled()
+        | (AutomationCondition.code_version_changed().since_last_handled() & deps_ready)
+    )
+    & ~AutomationCondition.in_progress()
+)
 ```
 
 The "never materialized yet" clause wraps `newly_true().since_last_handled()` around the
@@ -145,8 +146,14 @@ later; wrapping only the trigger without the deps gate can permanently miss its 
 fire if blocked at the exact tick the asset first becomes missing (the mechanism `eager()`
 itself relies on `any_deps_updated()` as a second, independent trigger to recover from — which
 isn't available here, since `code_version_changed()` doesn't care about dependency updates at
-all). `code_version_changed()` needs no such wrapping — unlike a one-tick pulse, it already
-stays true until an evaluation actually picks it up.
+all).
+
+`code_version_changed()` is a one-tick pulse in its own right — its internal cursor advances
+to the current code version on every evaluation regardless of outcome, so on its own it only
+reads true for the single tick right after a version change. `.since_last_handled()` turns
+that pulse into a state that holds true from the tick it fires until a request for it is
+actually handled, so it survives however many ticks `deps_ready` stays closed for, rather than
+silently getting lost if a dependency happens to still be missing or mid-run on that one tick.
 
 Like `eager()` itself, this only reacts to *transitions* from the baseline established at its
 first-ever evaluation forward — a dbt model that's already materialized before that first
@@ -154,10 +161,70 @@ evaluation (e.g. adding this component to an existing, already-running dbt proje
 trigger a cube's first materialization on its own; that first one needs a manual kick, same
 as it would with `eager()`.
 
-These assets are also targeted by their own `AutomationConditionSensorDefinition`
-(`<dbt_project_name>_cube_automation_condition_sensor`), rather than relying on the
-platform's single default sensor — Dagster automatically excludes any asset targeted by an
-explicit sensor from the default one, so this doesn't cause double evaluation.
+These assets don't bring their own `AutomationConditionSensorDefinition` — they're picked up
+by Dagster's own default automation condition sensor like any other asset with an
+`automation_condition`, which is enough for most projects. See
+["Advanced: bringing your own automation sensor"](#advanced-bringing-your-own-automation-sensor)
+below if you want these assets (and/or `CubeSupersetSyncComponent`'s dataset assets) managed
+by a sensor of their own instead — e.g. to start/stop/observe their automation independently
+of everything else in your deployment.
+
+### Advanced: bringing your own automation sensor
+
+By default, cube/view assets (and `CubeSupersetSyncComponent`'s dataset assets, which reuse
+the exact same automation condition) are evaluated by Dagster's single default automation
+condition sensor, along with every other asset in your deployment that has an
+`automation_condition` set. That's correct behavior with zero setup — nothing here requires a
+custom sensor to work.
+
+If you want to start/stop/observe automation for just these assets independently of the rest
+of your deployment, you can register your own `AutomationConditionSensorDefinition`. This
+library deliberately doesn't do that for you, or bundle a tag to target one by — see
+`GENERATED_ASSET_AUTOMATION_CONDITION`'s own comment in `cube_dbt_project/component.py` for
+why (in short: a bundled tag silently stops working the moment a subclass override builds a
+fresh `AssetSpec` without it, which is a confusing thing to have to debug for a property that
+isn't required for correctness). Building one yourself is a few lines — override
+`get_cube_asset_spec`/`get_view_asset_spec` (and `get_dataset_asset_spec`, if you're also
+using `CubeSupersetSyncComponent`) to tag the specs you want covered, then target that tag
+with your own sensor:
+
+```python
+# e.g. defs/resources.py, or wherever your project defines Dagster resources/sensors
+import dagster as dg
+from dagster_cube_dbt import CubeDbtProjectComponent
+
+MY_AUTOMATION_TAG_KEY = "my_project/automation_sensor"
+MY_AUTOMATION_TAG_VALUE = "managed"
+
+
+class MyProjectCubeComponent(CubeDbtProjectComponent):
+    def get_cube_asset_spec(self, cube):
+        return super().get_cube_asset_spec(cube).merge_attributes(
+            tags={MY_AUTOMATION_TAG_KEY: MY_AUTOMATION_TAG_VALUE}
+        )
+
+    def get_view_asset_spec(self, view):
+        return super().get_view_asset_spec(view).merge_attributes(
+            tags={MY_AUTOMATION_TAG_KEY: MY_AUTOMATION_TAG_VALUE}
+        )
+
+
+# if you're also using CubeSupersetSyncComponent, tag its dataset assets the same way via a
+# similar override of get_dataset_asset_spec on a CubeSupersetSyncComponent subclass
+
+my_cube_automation_sensor = dg.AutomationConditionSensorDefinition(
+    name="my_cube_automation_sensor",
+    target=dg.AssetSelection.tag(MY_AUTOMATION_TAG_KEY, MY_AUTOMATION_TAG_VALUE),
+    default_status=dg.DefaultSensorStatus.RUNNING,
+)
+```
+
+`AssetSelection.tag(...)` resolves against your whole deployment's asset graph at evaluation
+time, not just what one component builds — so this one sensor picks up both components' assets
+as long as they're both tagged the same way, without either component needing to know about
+the other. `merge_attributes` (not `replace_attributes`) matters if you're also setting `tags`
+for some other reason in the same override — `replace_attributes` would overwrite them instead
+of adding to them.
 
 ## Promoting generated files to your Cube server
 
