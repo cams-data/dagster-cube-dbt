@@ -17,17 +17,12 @@ from dagster_dbt.dbt_project import DbtProject
 from dagster_dbt.dbt_project_manager import DbtProjectArgsManager
 from dbt_engine import DBT_TARGET
 
-from dagster_cube_dbt.components.cube_dbt_project.component import (
-    GENERATED_ASSET_AUTOMATION_TAGS,
-    CubeDbtProjectComponent,
-    CubeSelect,
-)
+from dagster_cube_dbt.components.cube_dbt_project.component import CubeDbtProjectComponent, CubeSelect
 from dagster_cube_dbt.components.cube_superset_sync.component import (
     CubeSupersetSyncComponent,
     _resolve_view_members,
 )
 from dagster_cube_dbt.cube_state import CUBE_STATE_FILENAME
-from dagster_cube_dbt.resources import CubeFilePromoter
 from dagster_cube_dbt.superset_resource import SupersetResource
 
 FIXTURE_DBT_PROJECT = Path(__file__).parent / "fixtures" / "dbt_project"
@@ -93,21 +88,6 @@ def _with_superset(defs: dg.Definitions) -> dg.Definitions:
     return dg.Definitions.merge(defs, dg.Definitions(resources={"superset": _NoopSuperset()}))
 
 
-class _NoopCubeFilePromoter(CubeFilePromoter):
-    """Satisfies the `cube_file_promoter` resource requirement for building the sibling's own
-    (real) `Definitions` via `build_defs_from_state` -- mirrors
-    `test_component_integration.py`'s `NoopCubeFilePromoter`, needed only here since every other
-    test in this file goes through `prepare_state_aware_lookup` instead, which doesn't need it.
-    """
-
-    def promote(self, context: dg.AssetExecutionContext, cubes_dir: Path, views_dir: Path) -> None:
-        return
-
-
-def _with_promoter(defs: dg.Definitions) -> dg.Definitions:
-    return dg.Definitions.merge(defs, dg.Definitions(resources={"cube_file_promoter": _NoopCubeFilePromoter()}))
-
-
 def test_one_dataset_asset_spec_per_view(tmp_path, defs_dir):
     sibling = _make_sibling(defs_dir)
     state_path = tmp_path / "state"
@@ -120,63 +100,6 @@ def test_one_dataset_asset_spec_per_view(tmp_path, defs_dir):
     dataset_key = dg.AssetKey(["superset_dataset", "journeys_overview"])
     dataset_keys = {key for key in asset_graph.get_all_asset_keys() if key.path[0] == "superset_dataset"}
     assert dataset_keys == {dataset_key}
-
-
-def test_dataset_asset_spec_carries_the_shared_automation_tag(tmp_path, defs_dir):
-    """Dataset assets don't register their own `AutomationConditionSensorDefinition` --
-    `build_defs_from_sibling_state` never builds one. Instead they carry the same tag
-    `CubeDbtProjectComponent` puts on its own cube/view assets, so that component's *one*
-    tag-scoped sensor manages these too, without either component reading the other's state or
-    live `Definitions`. See `test_a_tag_scoped_sensor_from_the_sibling_also_manages_dataset_assets`
-    below for the actual cross-component proof; this just confirms the tag itself is present.
-    """
-    sibling = _make_sibling(defs_dir)
-    state_path = tmp_path / "state"
-    sibling.write_state_to_path(state_path)
-
-    context = dg.ComponentTree.for_test().load_context
-    defs = _with_superset(_make_sync_component().build_defs_from_sibling_state(context, sibling, state_path))
-    asset_graph = defs.resolve_asset_graph()
-
-    assert defs.sensors is None or not any(
-        isinstance(s, dg.AutomationConditionSensorDefinition) for s in defs.sensors
-    )
-
-    dataset_key = dg.AssetKey(["superset_dataset", "journeys_overview"])
-    tags = asset_graph.get(dataset_key).tags
-    assert GENERATED_ASSET_AUTOMATION_TAGS.items() <= tags.items()
-
-
-def test_a_tag_scoped_sensor_from_the_sibling_also_manages_dataset_assets(tmp_path, defs_dir):
-    """The actual cross-component proof for the tag-based design (chosen over each component
-    registering its own key-scoped sensor, or one component reaching into the other's state/
-    live defs to build a combined one): builds the sibling's *real* `Definitions` (via
-    `build_defs_from_state`, not just `prepare_state_aware_lookup` -- so its own tag-scoped
-    `cube_sensor` actually exists), merges it with the sync component's dataset assets, and
-    confirms there's still exactly one `AutomationConditionSensorDefinition` overall, and that
-    it resolves (against the *merged* asset graph) to cube, view, *and* dataset asset keys
-    together -- proving `AssetSelection.tag(...)` really does resolve deployment-wide, not just
-    against whatever a single component itself built.
-    """
-    sibling = _make_sibling(defs_dir)
-    state_path = tmp_path / "state"
-    sibling.write_state_to_path(state_path)
-
-    context = dg.ComponentTree.for_test().load_context
-    sibling_defs = _with_promoter(sibling.build_defs_from_state(context, state_path))
-    sync_defs = _with_superset(_make_sync_component().build_defs_from_sibling_state(context, sibling, state_path))
-    defs = dg.Definitions.merge(sibling_defs, sync_defs)
-    asset_graph = defs.resolve_asset_graph()
-
-    automation_sensors = [s for s in defs.sensors or [] if isinstance(s, dg.AutomationConditionSensorDefinition)]
-    assert len(automation_sensors) == 1
-    sensor = automation_sensors[0]
-    assert sensor.default_status == dg.DefaultSensorStatus.RUNNING
-
-    resolved_keys = sensor.asset_selection.resolve(asset_graph)
-    assert sibling.asset_key_for_cube("journey_samples") in resolved_keys
-    assert sibling.asset_key_for_view("journeys_overview") in resolved_keys
-    assert dg.AssetKey(["superset_dataset", "journeys_overview"]) in resolved_keys
 
 
 def test_dataset_depends_on_the_sibling_view_asset_and_shares_its_code_version(tmp_path, defs_dir):

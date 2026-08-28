@@ -25,7 +25,6 @@ from dagster.components.resolved.model import Resolver
 
 from dagster_cube_dbt.components.cube_dbt_project.component import (
     GENERATED_ASSET_AUTOMATION_CONDITION,
-    GENERATED_ASSET_AUTOMATION_TAGS,
     CubeDbtProjectComponent,
 )
 from dagster_cube_dbt.merge import resolve_extends
@@ -388,11 +387,5 @@ class CubeSupersetSyncComponent(dg.Component, dg.Resolvable):
             metadata=_dataset_metadata(view, self._resolved_cubes),
             code_version=sibling_view_spec.code_version,
             automation_condition=GENERATED_ASSET_AUTOMATION_CONDITION,
-            # Same tag `CubeDbtProjectComponent` puts on its own cube/view assets -- lets that
-            # component's one tag-scoped sensor also manage these dataset assets, without this
-            # component needing its own sensor, reading the sibling's live `Definitions`, or
-            # otherwise knowing about it at all. See `GENERATED_ASSET_AUTOMATION_TAGS`'s own
-            # comment for the full reasoning.
-            tags=GENERATED_ASSET_AUTOMATION_TAGS,
             kinds={"superset"},
         )
