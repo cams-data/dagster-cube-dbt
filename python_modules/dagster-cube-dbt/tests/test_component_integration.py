@@ -432,15 +432,20 @@ def test_cube_and_view_assets_are_virtual_and_freshness_looks_through_them(tmp_p
     assert asset_graph.get_non_virtual_ancestor_keys(exchange_rates_key) == set()
 
 
-def test_get_view_asset_spec_depends_on_the_last_segment_of_a_multi_hop_join_path(tmp_path, defs_dir):
-    """Regression test for a real production bug: a view member's `join_path` is a
-    dot-separated chain of cube names (e.g. `"journey_samples.dates"`, meaning "reach `dates`
-    by joining through `journey_samples`"), not necessarily a single cube. The dependency
-    belongs on the *last* segment (the cube whose members are actually being included), not
-    the first -- an earlier version of `get_view_asset_spec` took the first segment instead,
-    which for a real view chaining several members off one fact cube (e.g. `"fact.dates"`,
-    `"fact.times"`, `"fact.routes"`) silently collapsed every one of them onto just the fact
-    cube, dropping the dimension cubes' dependencies entirely.
+def test_get_view_asset_spec_depends_on_every_segment_of_a_multi_hop_join_path(tmp_path, defs_dir):
+    """A view member's `join_path` is a dot-separated chain of cube names (e.g.
+    `"origin_locations.dates"`, meaning "reach `dates` by joining through `origin_locations`"),
+    not necessarily a single cube. The cube whose members are actually being included is the
+    *last* segment, not the first -- an earlier version of `get_view_asset_spec` took the first
+    segment instead, which for a real view chaining several members off one fact cube (e.g.
+    `"fact.dates"`, `"fact.times"`, `"fact.routes"`) silently collapsed every one of them onto
+    just the fact cube, dropping the dimension cubes' dependencies entirely.
+
+    But every segment, not just the last, is a real dependency: Cube's compiled SQL joins
+    through all of them, so a cube that only ever appears as an intermediate hop (never as its
+    own `join_path` entry) still needs its own edge in the asset graph -- otherwise a change to
+    it wouldn't propagate freshness/automation-condition updates to the view at all, even though
+    the view's actual query depends on it.
     """
     component = _make_component(defs_dir)
     state_path = tmp_path / "state"
@@ -450,9 +455,11 @@ def test_get_view_asset_spec_depends_on_the_last_segment_of_a_multi_hop_join_pat
     merged = json.loads(state_file.read_text())
     for view in merged["views"]:
         if view["name"] == "journeys_overview":
-            # "dates" is a real generated cube (see ALL_GENERATED_CUBE_NAMES), reachable from
-            # journey_samples via its own `joins:` -- a realistic multi-hop join_path.
-            view["cubes"].append({"join_path": "journey_samples.dates", "includes": "*"})
+            # "dates" and "origin_locations" are real generated cubes (see
+            # ALL_GENERATED_CUBE_NAMES); "origin_locations" appears here *only* as an
+            # intermediate hop, never as its own join_path entry -- a realistic multi-hop
+            # join_path reaching dates through it.
+            view["cubes"].append({"join_path": "origin_locations.dates", "includes": "*"})
     state_file.write_text(json.dumps(merged))
 
     context = dg.ComponentTree.for_test().load_context
@@ -460,8 +467,9 @@ def test_get_view_asset_spec_depends_on_the_last_segment_of_a_multi_hop_join_pat
     asset_graph = defs.resolve_asset_graph()
 
     view_key = component.asset_key_for_view("journeys_overview")
-    dates_key = component.asset_key_for_cube("dates")
-    assert dates_key in asset_graph.get(view_key).parent_keys
+    parent_keys = asset_graph.get(view_key).parent_keys
+    assert component.asset_key_for_cube("dates") in parent_keys
+    assert component.asset_key_for_cube("origin_locations") in parent_keys
 
 
 def test_get_view_asset_spec_respects_a_subclass_renaming_a_member_cubes_key(tmp_path, defs_dir):

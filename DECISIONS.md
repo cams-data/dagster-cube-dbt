@@ -3229,3 +3229,20 @@ Phase 50's error-body fix paid off immediately: the same user's next retry showe
 
 - One new test in `test_superset_resource.py`: `sync_dataset` sets `session.headers["Referer"]` to `base_url`. Confirmed via revert-and-confirm-fail: temporarily removed the header assignment, watched the test fail with a `KeyError` (no `Referer` key set at all), restored it.
 - Full suite: **155/155 passed** (154 + 1 new test).
+
+## Phase 52 -- `get_view_asset_spec` now depends on every segment of a multi-hop `join_path`, not just the last
+
+User caught this by inspection, not a crash: a view of theirs joins through a cube (`origin_locations`) purely as an intermediate hop to reach a further cube's members, and Dagster showed no dependency edge to it at all. Asked for my take before changing anything.
+
+### Decision
+
+- Phase 45 fixed which segment of a `join_path` identifies the cube whose members are being included (the *last* one, not the first) but never asked whether the *other* segments in the chain are also real dependencies. They are: Cube's compiled SQL joins through every cube in the path to reach the last one, so a cube that appears only as an intermediate hop (never as its own `join_path` entry elsewhere in the view) still has a real, unrepresented edge -- a schema or definition change to it changes the view's query exactly as much as a change to the terminal cube would, and the freshness/`AutomationCondition` propagation this file relies on (`_DEPS_READY`) only ever sees what `deps` actually lists.
+- Fixed in `get_view_asset_spec`: `member_cube_names` now collects *every* dot-separated segment of each member's `join_path` (still a `set`, so a cube reachable both as an intermediate hop and as its own explicit entry is deduplicated for free), not just `split(".")[-1]`.
+- Deliberately did not touch `cube_superset_sync/component.py`'s `_resolve_view_members` -- despite Phase 45 mirroring the last-segment fix into it, that function answers a different question ("which cube's fields does this member's `includes`/`excludes` apply to," for building the Superset sync payload), not "what does this view depend on." An intermediate hop's own fields aren't being synced by that member entry, so it has no reason to appear there. Confirmed the Superset dataset asset's own dependency is on the *view* as a whole (`get_dataset_asset_spec`'s `deps=[sibling_view_spec.key]`), not on individual member cubes, so this asymmetry is correct, not an oversight.
+
+### Verification
+
+- Rewrote the existing multi-hop regression test in `test_component_integration.py` (previously only checked the last segment) into `test_get_view_asset_spec_depends_on_every_segment_of_a_multi_hop_join_path`, using a `"origin_locations.dates"` join_path where `origin_locations` appears *only* as an intermediate hop, asserting both `dates` and `origin_locations` end up as parent keys.
+- Confirmed via revert-and-confirm-fail: stashed the fix, watched the new test fail (missing `origin_locations` edge), restored it.
+- `mkdocs build --strict` clean.
+- Full suite: **155/155 passed** (same count -- rewrote an existing test rather than adding a new one).

@@ -695,11 +695,18 @@ class CubeDbtProjectComponent(DbtProjectComponent):
         A member's `join_path` is a dot-separated chain of cube names (e.g.
         `"orders.customers"`), not necessarily a single cube -- Cube itself uses this to
         express "reach `customers`'s members by joining through `orders`." The cube whose
-        members that entry's `includes`/`excludes` actually apply to (and therefore the real
-        dependency) is the *last* segment, not the first -- a real production view (multiple
-        `join_path` entries chained off one fact cube, e.g. `"fact.dates"`/`"fact.times"`)
-        broke an earlier version of this that took the first segment instead, silently
-        collapsing every multi-hop member onto just the fact cube and dropping the rest.
+        members that entry's `includes`/`excludes` actually apply to is the *last* segment,
+        not the first -- a real production view (multiple `join_path` entries chained off one
+        fact cube, e.g. `"fact.dates"`/`"fact.times"`) broke an earlier version of this that
+        took the first segment instead, silently collapsing every multi-hop member onto just
+        the fact cube and dropping the rest.
+
+        But every segment, not just the last, is a real dependency: Cube's compiled SQL joins
+        through *all* of them to reach the last one, so a cube that only ever appears as an
+        intermediate hop (never as its own `join_path` entry) still needs its own edge here --
+        a schema or definition change to it changes the view's query just as much as one to the
+        terminal cube would, and the freshness/automation-condition propagation this module
+        relies on (see `_DEPS_READY` above) only sees what `deps` actually lists.
 
         Each dependency is resolved through `self._cube_asset_spec_by_name` -- never
         `self.asset_key_for_cube` directly -- for the same override-safety reason
@@ -709,9 +716,10 @@ class CubeDbtProjectComponent(DbtProjectComponent):
         """
         name = view["name"]
         member_cube_names = {
-            str(member["join_path"]).split(".")[-1]
+            segment
             for member in view.get("cubes", [])
             if "join_path" in member
+            for segment in str(member["join_path"]).split(".")
         }
         deps = []
         for member_name in sorted(member_cube_names):
