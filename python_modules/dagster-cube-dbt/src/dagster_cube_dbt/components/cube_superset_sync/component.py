@@ -358,7 +358,23 @@ class CubeSupersetSyncComponent(dg.Component, dg.Resolvable):
                 )
                 yield dg.MaterializeResult(asset_key=spec.key)
 
-        return dg.Definitions(assets=[_superset_dataset_assets])
+        # Without this, these assets' `automation_condition=GENERATED_ASSET_AUTOMATION_CONDITION`
+        # (set on their specs above) falls to the platform's single default
+        # `default_automation_condition_sensor` instead -- which still evaluates the condition
+        # correctly, but means these assets can't be started/stopped/observed independently of
+        # every other automation-condition asset in the deployment. Scoped and always-on for the
+        # same reason `CubeDbtProjectComponent.build_defs_from_state`'s own `cube_sensor` is (see
+        # its comment): Dagster automatically excludes any asset targeted by an explicit
+        # `AutomationConditionSensorDefinition` from the default one, so this doesn't cause
+        # double evaluation, and `default_status=RUNNING` avoids automation silently going off
+        # for these assets until someone starts a custom sensor by hand.
+        superset_sensor = dg.AutomationConditionSensorDefinition(
+            name=f"{_sync_pool_name(self.dbt_cube_component)}_superset_dataset_automation_condition_sensor",
+            target=dg.AssetSelection.assets(*[spec.key for spec in specs]),
+            default_status=dg.DefaultSensorStatus.RUNNING,
+        )
+
+        return dg.Definitions(assets=[_superset_dataset_assets], sensors=[superset_sensor])
 
     @public
     def asset_key_for_dataset(self, name: str) -> dg.AssetKey:
