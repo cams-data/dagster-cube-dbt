@@ -1301,8 +1301,15 @@ def test_build_defs_from_state_registers_a_sensor_targeting_every_cube_and_view_
     targeting these assets, they'd fall to the platform's single default automation condition
     sensor instead -- which still evaluates their condition correctly, but means they can't be
     started/stopped/observed independently of every other automation-condition asset in the
-    deployment. This never had direct test coverage before -- the exact same class of gap the
-    user separately caught live for `CubeSupersetSyncComponent`'s dataset assets.
+    deployment. This never had direct test coverage before -- the exact same class of gap
+    `CubeSupersetSyncComponent`'s dataset assets had, caught live in a real deployment.
+
+    The sensor targets `AssetSelection.tag(...)`, not a literal key list -- see
+    `GENERATED_ASSET_AUTOMATION_TAGS`'s own comment, and
+    `test_a_tag_scoped_sensor_from_the_sibling_also_manages_dataset_assets` in
+    `test_cube_superset_sync_component.py` for the cross-component proof that this one sensor
+    also manages `CubeSupersetSyncComponent`'s dataset assets, without either component reading
+    the other's state or live `Definitions`.
     """
     component = _make_component(defs_dir)
     state_path = tmp_path / "state"
