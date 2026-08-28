@@ -1294,3 +1294,100 @@ def test_generated_asset_automation_condition_does_not_fire_on_code_version_chan
         defs=changed_defs, instance=instance, asset_selection=selection, cursor=result.cursor
     )
     assert result.total_requested == 0
+
+
+def test_build_defs_from_state_registers_a_sensor_targeting_every_cube_and_view_asset(tmp_path, defs_dir):
+    """Regression test: without a custom `AutomationConditionSensorDefinition` explicitly
+    targeting these assets, they'd fall to the platform's single default automation condition
+    sensor instead -- which still evaluates their condition correctly, but means they can't be
+    started/stopped/observed independently of every other automation-condition asset in the
+    deployment. This never had direct test coverage before -- the exact same class of gap the
+    user separately caught live for `CubeSupersetSyncComponent`'s dataset assets.
+    """
+    component = _make_component(defs_dir)
+    state_path = tmp_path / "state"
+    component.write_state_to_path(state_path)
+
+    context = dg.ComponentTree.for_test().load_context
+    defs = _with_promoter(component.build_defs_from_state(context, state_path), NoopCubeFilePromoter())
+
+    automation_sensors = [s for s in defs.sensors or [] if isinstance(s, dg.AutomationConditionSensorDefinition)]
+    assert len(automation_sensors) == 1
+    sensor = automation_sensors[0]
+    assert sensor.default_status == dg.DefaultSensorStatus.RUNNING
+
+    expected_keys = {component.asset_key_for_cube(name) for name in ALL_GENERATED_CUBE_NAMES} | {
+        component.asset_key_for_view("journeys_overview")
+    }
+    assert sensor.asset_selection.resolve(defs.resolve_asset_graph()) == expected_keys
+
+
+def test_generated_asset_automation_condition_does_not_lose_a_code_version_change_while_blocked(
+    tmp_path, defs_dir
+):
+    """Regression test for a real bug the user found live, on an asset that (unlike Phase 38's
+    test above) had *already* been materialized at least once before its definition changed
+    again. `AutomationCondition.code_version_changed()`'s own cursor (confirmed by reading
+    dagster's actual operand implementation, `operands.py::CodeVersionChangedCondition.evaluate`)
+    advances to the current code version on *every* evaluation tick regardless of outcome --
+    so bare `code_version_changed() & _DEPS_READY` is only ever true for exactly the one tick
+    right after the version changes, not "until actually handled" as the comment above once
+    claimed. If deps are still missing (or in progress) on that one tick, the signal is silently
+    lost -- unlike `missing()`, whose own persistence while unmaterialized is what let Phase 38's
+    test pass despite this: that test's asset was never materialized at all, so its `missing()`
+    branch fired independently once the dep became ready, masking this bug completely.
+    """
+    component = _make_component(defs_dir)
+    state_path = tmp_path / "state"
+    component.write_state_to_path(state_path)
+
+    context = dg.ComponentTree.for_test().load_context
+    defs = _with_promoter(component.build_defs_from_state(context, state_path), NoopCubeFilePromoter())
+
+    journey_samples_key = component.asset_key_for_cube("journey_samples")
+    model_key = component.asset_key_for_model("journey_samples")
+    selection = dg.AssetSelection.assets(journey_samples_key)
+
+    instance = dg.DagsterInstance.ephemeral()
+
+    # Materialize the cube asset ONCE up front -- unlike Phase 38's test, so missing() is False
+    # throughout, isolating code_version_changed()'s own persistence from missing()'s.
+    instance.report_runless_asset_event(dg.AssetMaterialization(asset_key=journey_samples_key))
+
+    result = dg.evaluate_automation_conditions(defs=defs, instance=instance, asset_selection=selection)
+    assert result.total_requested == 0
+
+    # the cube's definition changes again while its dbt model dep is (still) missing.
+    (defs_dir / "title_patch.yaml").write_text(
+        "cubes:\n  - name: journey_samples\n    title: Changed Title\n"
+    )
+    component.write_state_to_path(state_path)
+    changed_defs = _with_promoter(
+        component.build_defs_from_state(context, state_path), NoopCubeFilePromoter()
+    )
+    result = dg.evaluate_automation_conditions(
+        defs=changed_defs, instance=instance, asset_selection=selection, cursor=result.cursor
+    )
+    assert result.total_requested == 0
+
+    # blocked for *several* ticks, not just one -- this is what actually distinguishes the
+    # bug from correct behavior; a single blocked tick looks identical either way.
+    for _ in range(3):
+        result = dg.evaluate_automation_conditions(
+            defs=changed_defs, instance=instance, asset_selection=selection, cursor=result.cursor
+        )
+        assert result.total_requested == 0
+
+    # the dep finally materializes -> the still-pending code version change must fire now,
+    # not be silently gone.
+    instance.report_runless_asset_event(dg.AssetMaterialization(asset_key=model_key))
+    result = dg.evaluate_automation_conditions(
+        defs=changed_defs, instance=instance, asset_selection=selection, cursor=result.cursor
+    )
+    assert result.total_requested == 1
+
+    # nothing further changed -> not re-requested.
+    result = dg.evaluate_automation_conditions(
+        defs=changed_defs, instance=instance, asset_selection=selection, cursor=result.cursor
+    )
+    assert result.total_requested == 0

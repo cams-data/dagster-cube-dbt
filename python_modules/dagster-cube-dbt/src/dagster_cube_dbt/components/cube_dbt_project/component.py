@@ -253,13 +253,25 @@ def _code_version(entity: Mapping[str, Any]) -> str:
 # `evaluate_automation_conditions` tick sequence -- see DECISIONS.md -- not assumed from
 # reading dagster's own source or docs alone.
 #
-# `code_version_changed()` needs no `newly_true()`/`since_last_handled()` wrapping: unlike a
-# one-tick pulse, it stays true from the tick the version changes until the tick it's
-# actually evaluated as part of a request, so it isn't lost the same way a raw edge-triggered
-# condition would be -- and, unlike `missing()`, applying the deps-ready gate to it afterwards
-# (rather than inside a `newly_true()` wrap) is fine for the same reason: since it doesn't
-# self-expire before being consumed, a request blocked by the gate one tick still fires the
-# next tick the gate opens, instead of the transition being lost.
+# `code_version_changed()` IS a one-tick pulse, contrary to what this comment used to claim --
+# confirmed both by reading dagster's own operand (`CodeVersionChangedCondition.evaluate`,
+# in `declarative_automation/operands/operands.py`) and by reproducing it directly against a
+# real `evaluate_automation_conditions` tick sequence: its cursor advances to the *current*
+# code version on every single tick regardless of outcome, so it only ever reads true on the
+# one tick immediately after the version changes -- exactly like a raw `newly_true()` pulse,
+# not a state that "holds" until consumed. A bare trailing `& _DEPS_READY` therefore has the
+# same lost-transition problem `missing()` needed `since_last_handled()` for: if deps are
+# still missing (or in progress) on that one pulse tick, the signal is gone, and the asset
+# never auto-materializes even after the dep becomes ready -- a real bug, caught live by the
+# user on an asset that had already been materialized once before (its `missing()` branch was
+# permanently false, so it wasn't there to mask this). `.since_last_handled()` on
+# `code_version_changed()` itself fixes it: unlike `missing()`, no `newly_true()` wrap is
+# needed first, since the bare condition is already pulse-shaped -- `since_last_handled()`
+# holds that pulse true from the tick it fires until the tick a request actually goes out,
+# surviving any number of blocked ticks in between. The deps-ready gate is then safe to apply
+# as a plain trailing `&` outside the wrap (unlike `missing()`, which needs the gate *inside*
+# the `newly_true()`): the persisted true-until-handled state doesn't depend on which tick the
+# gate happens to open on, so nothing is lost by gating afterwards.
 #
 # But it still needs that deps-ready gate applied at all -- editing a cube/view's own
 # definition (title, measures, ...) before its backing dbt model has ever run (or while a
@@ -271,7 +283,7 @@ _DEPS_READY = ~dg.AutomationCondition.any_deps_missing() & ~dg.AutomationConditi
 GENERATED_ASSET_AUTOMATION_CONDITION = (
     (
         (dg.AutomationCondition.missing() & _DEPS_READY).newly_true().since_last_handled()
-        | (dg.AutomationCondition.code_version_changed() & _DEPS_READY)
+        | (dg.AutomationCondition.code_version_changed().since_last_handled() & _DEPS_READY)
     )
     & ~dg.AutomationCondition.in_progress()
 ).with_label("cube_code_version_changed")
