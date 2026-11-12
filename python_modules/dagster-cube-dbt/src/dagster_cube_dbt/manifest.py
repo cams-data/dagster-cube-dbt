@@ -97,7 +97,31 @@ def _as_name_set(value: str | Sequence[str] | None, column_names: set[str]) -> s
     return raw & column_names
 
 
-def model_primary_key_names(model: ModelNode, test_index: TestIndex) -> set[str]:
+def manifest_adapter_type(manifest: Mapping[str, Any]) -> str | None:
+    """The dbt adapter the manifest was parsed with (`metadata.adapter_type`, e.g.
+    `clickhouse`, `starrocks`), or `None` if the manifest doesn't record one."""
+    adapter_type = (manifest.get("metadata") or {}).get("adapter_type")
+    return str(adapter_type).lower() if adapter_type else None
+
+
+def _column_cube_meta(column: ColumnNode) -> Mapping[str, Any]:
+    """A column's `meta.cube` dict. dbt 1.10+ also mirrors `meta` under `config.meta`; the
+    two are normally identical, but `config.meta` is consulted as a fallback in case only
+    that one is populated."""
+    for meta in (column.get("meta"), (column.get("config") or {}).get("meta")):
+        cube_meta = meta.get("cube") if isinstance(meta, Mapping) else None
+        if isinstance(cube_meta, Mapping):
+            return cube_meta
+    return {}
+
+
+def column_declares_primary_key(column: ColumnNode) -> bool:
+    return _column_cube_meta(column).get("primary_key") is True
+
+
+def model_primary_key_names(
+    model: ModelNode, test_index: TestIndex, adapter_type: str | None = None
+) -> set[str]:
     """Primary key detection, in strict priority order (each tier used only if every tier
     above it found nothing):
 
@@ -110,18 +134,25 @@ def model_primary_key_names(model: ModelNode, test_index: TestIndex) -> set[str]
        real manifests exercise it.
     2. Column-level dbt 1.5+ constraint (`columns: - name: x constraints: [{type:
        primary_key}]`).
-    3. Adapter-specific `config.primary_key` model config, as a plain string or a list --
+    3. Column `meta.cube.primary_key: true` -- adapter-neutral, and the one declaration that
+       works on warehouses with neither constraint support nor a `primary_key` model config
+       (e.g. dbt-starrocks writing to an Iceberg catalog, where nothing at the engine level
+       is a key). Every flagged column joins the key, so flagging several gives a composite
+       key.
+    4. Adapter-specific `config.primary_key` model config, as a plain string or a list --
        ClickHouse doesn't support SQL primary-key constraints at all (its tables have no
        relational key concept), so `constraints`-based declaration is never available there;
        `config(primary_key=...)` on the model is the *only* way to declare one, and it's kept
        in a wholly separate manifest field from `constraints`, confirmed against real
        `dbt parse` output (dbt-clickhouse).
-    4. Adapter-specific `config.order_by` model config, same string-or-list shape -- for a
+    5. Adapter-specific `config.order_by` model config, same string-or-list shape -- for a
        ClickHouse MergeTree table, `ORDER BY` *is* the primary key whenever `PRIMARY KEY`
        isn't explicitly set (confirmed against ClickHouse's own docs: "If no primary key is
        defined... ClickHouse uses the sorting key as primary key"), so this is consulted only
-       when tier 3 found nothing.
-    5. A column tagged `primary_key`, or covered by both a `unique` and a `not_null` test.
+       when the tiers above found nothing. Only trusted when `adapter_type` is `clickhouse`
+       (or unknown): on other adapters `order_by` means something else (on dbt-starrocks it's
+       a sort key), and treating it as a primary key would silently produce a wrong one.
+    6. A column tagged `primary_key`, or covered by both a `unique` and a `not_null` test.
     """
     model_level = {
         column_name
@@ -140,6 +171,12 @@ def model_primary_key_names(model: ModelNode, test_index: TestIndex) -> set[str]
     if column_level:
         return column_level
 
+    meta_level = {
+        column["name"] for column in model_columns(model) if column_declares_primary_key(column)
+    }
+    if meta_level:
+        return meta_level
+
     column_names = {column["name"] for column in model_columns(model)}
     config = model.get("config", {})
 
@@ -147,9 +184,10 @@ def model_primary_key_names(model: ModelNode, test_index: TestIndex) -> set[str]
     if config_primary_key:
         return config_primary_key
 
-    config_order_by = _as_name_set(config.get("order_by"), column_names)
-    if config_order_by:
-        return config_order_by
+    if adapter_type in (None, "clickhouse"):
+        config_order_by = _as_name_set(config.get("order_by"), column_names)
+        if config_order_by:
+            return config_order_by
 
     column_tests = test_index.get(model["name"], {})
     return {

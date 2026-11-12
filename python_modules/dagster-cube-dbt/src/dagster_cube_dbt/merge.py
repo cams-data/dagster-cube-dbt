@@ -54,6 +54,29 @@ class UnmatchedPatchTargetError(ValueError):
         )
 
 
+class MissingPrimaryKeyError(ValueError):
+    """Raised when a cube defines `joins` but has no `primary_key: true` dimension -- Cube
+    itself refuses to compile such a cube ("primary key for 'x' is required when join is
+    defined in order to make aggregates work properly"), so this surfaces the problem at
+    generation time, naming the cube and the ways to declare a key, rather than leaving it
+    to Cube's runtime compile log.
+    """
+
+    def __init__(self, cubes: list[str]) -> None:
+        self.cubes = cubes
+        offenders = "\n".join(f"  - {name}" for name in cubes)
+        super().__init__(
+            "The following cubes define `joins` but have no primary key dimension, which Cube "
+            "requires in order to make aggregates across a join work properly:\n"
+            f"{offenders}\n"
+            "Declare one on the dbt model, in any of these ways: `meta: {cube: {primary_key: "
+            "true}}` on each key column (several flagged columns make a composite key); a "
+            "model-level `constraints: [{type: primary_key, columns: [...]}]`; a column-level "
+            "primary_key constraint; `config.primary_key` (ClickHouse); or tag the column "
+            "`primary_key`. Or set `primary_key: true` on a dimension in the cube's merge patch."
+        )
+
+
 class StrategicMerger(deepmerge.Merger):
     def __init__(self, key: str = DEFAULT_MERGE_KEY) -> None:
         self.key = key
@@ -227,3 +250,24 @@ def discover_patch_files(root: Path, exclude: Iterable[Path] = ()) -> Iterator[P
         if any(excluded_dir in candidate.parents for excluded_dir in excluded_dirs):
             continue
         yield candidate
+
+
+def check_joined_cubes_have_primary_keys(
+    cubes: Sequence[Mapping[str, Any]], key: str = DEFAULT_MERGE_KEY
+) -> None:
+    """Raises `MissingPrimaryKeyError` for every cube whose *effective* definition (`extends`
+    resolved) has `joins` but no `primary_key: true` dimension. A cube extending a parent
+    that isn't among `cubes` is skipped: its parent is defined outside this pipeline, so
+    there's no way to tell whether the parent supplies a key.
+    """
+    resolved = resolve_extends(cubes, key)
+    offenders = [
+        name
+        for cube in cubes
+        if (name := str(cube[key]))
+        and not (cube.get(EXTENDS_KEY) and str(cube[EXTENDS_KEY]) not in resolved)
+        and resolved[name].get("joins")
+        and not any(d.get("primary_key") for d in resolved[name].get("dimensions") or [])
+    ]
+    if offenders:
+        raise MissingPrimaryKeyError(offenders)

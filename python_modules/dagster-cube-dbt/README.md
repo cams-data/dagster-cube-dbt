@@ -610,20 +610,33 @@ below):
      defensiveness, not because real manifests exercise it.)
   2. Otherwise, a column-level dbt 1.5+ constraint (`columns: [{name: ..., constraints:
      [{type: primary_key}]}]`).
-  3. Otherwise, the model's `config.primary_key` (plain string or list). This is for
+  3. Otherwise, any column with `meta: {cube: {primary_key: true}}` (also read from
+     `config.meta`). This is adapter-neutral, and the right choice on warehouses with neither
+     constraint support nor a `primary_key` model config — e.g. dbt-starrocks building into an
+     Iceberg catalog, where nothing at the engine level is a key. Flag several columns for a
+     composite key.
+  4. Otherwise, the model's `config.primary_key` (plain string or list). This is for
      warehouses like ClickHouse that have no SQL primary-key constraint at all — there,
      `config(primary_key=...)` on the model is the *only* way to declare one, and it's kept
      in a wholly separate manifest field from `constraints`, confirmed against a real
      `dbt parse` (dbt-clickhouse).
-  4. Otherwise, the model's `config.order_by` (same plain-string-or-list shape). A ClickHouse
+  5. Otherwise, the model's `config.order_by` (same plain-string-or-list shape). A ClickHouse
      MergeTree table's `ORDER BY` clause *is* its primary key whenever `PRIMARY KEY` isn't set
      explicitly (confirmed against ClickHouse's own docs: "If no primary key is defined...
      ClickHouse uses the sorting key as primary key"). `order_by` can also hold an arbitrary
      SQL expression rather than plain column names (e.g. a function call) — any entry that
      doesn't match an actual column on the model is silently dropped rather than treated as a
-     bogus primary-key column.
-  5. Otherwise, a column tagged `primary_key`, or covered by both a `unique` and a `not_null`
+     bogus primary-key column. **Only consulted when the manifest's `adapter_type` is
+     `clickhouse` (or absent):** on other adapters `order_by` means something else (on
+     dbt-starrocks it's a sort key), so it's ignored rather than producing a wrong key.
+  6. Otherwise, a column tagged `primary_key`, or covered by both a `unique` and a `not_null`
      test.
+
+  A cube that ends up with `joins` (from a merge patch, after `extends` is resolved) but no
+  primary key fails `dg` state refresh with a `MissingPrimaryKeyError` naming the cube —
+  Cube itself refuses to compile such a cube, so this surfaces it at generation time instead
+  of in Cube's runtime log. A cube extending a parent defined outside this pipeline is not
+  checked.
 - **No measures or joins are generated.** Both are left entirely to merge patches.
 
 ### Every cube-generating model needs an enforced dbt contract

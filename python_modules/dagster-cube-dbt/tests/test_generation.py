@@ -902,3 +902,140 @@ def test_config_order_by_expression_that_matches_no_column_is_ignored():
     assert cube["dimensions"][0]["primary_key"] is True
 
 
+def _starrocks_manifest(models):
+    manifest = _manifest(models)
+    manifest["metadata"] = {"adapter_type": "starrocks"}
+    return manifest
+
+
+def test_primary_key_detected_from_column_meta_cube_primary_key():
+    """The reported dbt-starrocks case: no constraints, no `config.primary_key`, just
+    `meta.cube.primary_key: true` on the column. Previously yielded no key at all."""
+    manifest = _starrocks_manifest(
+        [
+            _model(
+                "route_calculated_fct",
+                columns=[
+                    _column("route_key", data_type="string", meta={"cube": {"primary_key": True}}),
+                    _column("time_key", data_type="string"),
+                ],
+            )
+        ]
+    )
+
+    [cube] = generate_cubes(manifest)["cubes"]
+
+    dimensions = {d["name"]: d for d in cube["dimensions"]}
+    assert dimensions["route_key"]["primary_key"] is True
+    assert "primary_key" not in dimensions["time_key"]
+    # consumed, not leaked into the dimension's own meta
+    assert "meta" not in dimensions["route_key"]
+
+
+def test_primary_key_read_from_config_meta_when_column_meta_is_empty():
+    column = _column("route_key", data_type="string")
+    column["config"] = {"meta": {"cube": {"primary_key": True}}}
+    manifest = _manifest([_model("routes", columns=[column])])
+
+    [cube] = generate_cubes(manifest)["cubes"]
+
+    assert cube["dimensions"][0]["primary_key"] is True
+
+
+def test_multiple_columns_flagged_with_meta_cube_primary_key_form_a_composite_key():
+    manifest = _manifest(
+        [
+            _model(
+                "routes",
+                columns=[
+                    _column("route_key", data_type="string", meta={"cube": {"primary_key": True}}),
+                    _column("date_key", data_type="string", meta={"cube": {"primary_key": True}}),
+                    _column("name", data_type="string"),
+                ],
+            )
+        ]
+    )
+
+    [cube] = generate_cubes(manifest)["cubes"]
+
+    keyed = {d["name"] for d in cube["dimensions"] if d.get("primary_key")}
+    assert keyed == {"route_key", "date_key"}
+
+
+def test_dbt_constraints_take_priority_over_meta_cube_primary_key():
+    manifest = _manifest(
+        [
+            _model(
+                "routes",
+                constraints=[{"type": "primary_key", "columns": ["date_key"]}],
+                columns=[
+                    _column("route_key", data_type="string", meta={"cube": {"primary_key": True}}),
+                    _column("date_key", data_type="string"),
+                ],
+            )
+        ]
+    )
+
+    [cube] = generate_cubes(manifest)["cubes"]
+
+    keyed = {d["name"] for d in cube["dimensions"] if d.get("primary_key")}
+    assert keyed == {"date_key"}
+
+
+def test_meta_cube_primary_key_takes_priority_over_config_primary_key_and_order_by():
+    manifest = _manifest(
+        [
+            _model(
+                "routes",
+                columns=[
+                    _column("route_key", data_type="string", meta={"cube": {"primary_key": True}}),
+                    _column("date_key", data_type="string"),
+                ],
+                config_primary_key="date_key",
+                config_order_by=["date_key"],
+            )
+        ]
+    )
+
+    [cube] = generate_cubes(manifest)["cubes"]
+
+    keyed = {d["name"] for d in cube["dimensions"] if d.get("primary_key")}
+    assert keyed == {"route_key"}
+
+
+def test_config_order_by_is_not_treated_as_a_primary_key_on_starrocks():
+    """On dbt-starrocks `order_by` is a sort key, not a primary key -- using it would produce
+    a bogus key instead of none."""
+    manifest = _starrocks_manifest(
+        [
+            _model(
+                "routes",
+                columns=[
+                    _column("route_key", data_type="string"),
+                    _column("time_key", data_type="string"),
+                ],
+                config_order_by=["route_key", "time_key"],
+            )
+        ]
+    )
+
+    [cube] = generate_cubes(manifest)["cubes"]
+
+    assert not any(d.get("primary_key") for d in cube["dimensions"])
+
+
+def test_config_order_by_still_a_primary_key_on_clickhouse():
+    manifest = _manifest(
+        [
+            _model(
+                "routes",
+                columns=[_column("route_key", data_type="string")],
+                config_order_by=["route_key"],
+            )
+        ]
+    )
+    manifest["metadata"] = {"adapter_type": "clickhouse"}
+
+    [cube] = generate_cubes(manifest)["cubes"]
+
+    assert cube["dimensions"][0]["primary_key"] is True
