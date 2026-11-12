@@ -4,7 +4,9 @@ import pytest
 
 from dagster_cube_dbt.merge import (
     CircularExtendsError,
+    MissingPrimaryKeyError,
     UnmatchedPatchTargetError,
+    check_joined_cubes_have_primary_keys,
     discover_patch_files,
     merge_documents,
     resolve_extends,
@@ -383,3 +385,40 @@ def test_discover_patch_files_sorted_and_excludes(tmp_path):
         tmp_path / "b_patch.yaml",
         nested / "c_patch.yaml",
     ]
+
+
+def _cube(name, *, joins=None, primary_key=False, extends=None):
+    cube = {"name": name, "dimensions": [{"name": "id", "sql": "id", "type": "string"}]}
+    if primary_key:
+        cube["dimensions"][0]["primary_key"] = True
+    if joins:
+        cube["joins"] = joins
+    if extends:
+        cube["extends"] = extends
+    return cube
+
+
+JOIN = [{"name": "other", "relationship": "many_to_one", "sql": "1 = 1"}]
+
+
+def test_joined_cube_without_primary_key_raises_naming_the_cube():
+    with pytest.raises(MissingPrimaryKeyError, match="route_calculated_fct"):
+        check_joined_cubes_have_primary_keys([_cube("route_calculated_fct", joins=JOIN)])
+
+
+def test_joined_cube_with_primary_key_passes():
+    check_joined_cubes_have_primary_keys([_cube("a", joins=JOIN, primary_key=True)])
+
+
+def test_cube_without_joins_needs_no_primary_key():
+    check_joined_cubes_have_primary_keys([_cube("a")])
+
+
+def test_joined_cube_inherits_primary_key_through_extends():
+    check_joined_cubes_have_primary_keys(
+        [_cube("base", primary_key=True), _cube("child", joins=JOIN, extends="base")]
+    )
+
+
+def test_joined_cube_extending_a_cube_outside_the_pipeline_is_skipped():
+    check_joined_cubes_have_primary_keys([_cube("child", joins=JOIN, extends="hand_authored")])

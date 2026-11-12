@@ -14,6 +14,7 @@ from dagster_cube_dbt.manifest import (
     column_sql,
     filter_models,
     infer_dimension_type,
+    manifest_adapter_type,
     model_columns,
     model_contract_enforced,
     model_primary_key_names,
@@ -143,7 +144,8 @@ class ConflictingCubeNameError(ValueError):
 
 # meta.cube.* is a reserved namespace on dbt columns *and* models alike: on a column,
 # `dimension` is a control flag consumed by generation and never emitted, and `type`
-# overrides the inferred dimension type (handled separately, before _build_dimension, since
+# overrides the inferred dimension type and `primary_key: true` marks the column as part of
+# the cube's primary key (handled separately, before _build_dimension, since
 # consulting it can skip a type-inference failure entirely); on a model, `name` and `suffix`
 # are control flags consumed by _resolve_cube_name (handled separately, before _build_cube,
 # since the chosen name is a required positional argument to it) rather than becoming
@@ -222,6 +224,9 @@ def _build_dimension(
     cube_meta = dict(remaining_meta.pop("cube", None) or {})
     cube_meta.pop("dimension", None)
     cube_meta.pop("type", None)
+    # Consumed by primary-key detection (manifest.model_primary_key_names); the dimension's
+    # own `primary_key: true` above is the real output, so don't also leak it into `meta:`.
+    cube_meta.pop("primary_key", None)
     for key in PROMOTED_CUBE_DIMENSION_META_KEYS:
         if key in cube_meta:
             dimension[key] = cube_meta.pop(key)
@@ -285,6 +290,7 @@ def generate_cubes(
     """
     selected_models = filter_models(manifest, paths=paths, tags=tags, names=names)
     test_index = build_test_index(manifest)
+    adapter_type = manifest_adapter_type(manifest)
 
     uncontracted_models: list[str] = []
     conflicting_cube_names: list[str] = []
@@ -304,7 +310,7 @@ def generate_cubes(
             conflicting_cube_names.append(model["name"])
             continue
 
-        primary_key_names = model_primary_key_names(model, test_index)
+        primary_key_names = model_primary_key_names(model, test_index, adapter_type)
 
         dimensions: list[dict[str, Any]] = []
         for column in model_columns(model):

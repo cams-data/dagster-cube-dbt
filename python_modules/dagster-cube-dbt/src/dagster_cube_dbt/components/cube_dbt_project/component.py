@@ -24,7 +24,12 @@ from dagster_dbt.utils import ASSET_RESOURCE_TYPES
 from dagster_cube_dbt.cube_state import CUBE_STATE_FILENAME, read_cube_state, write_cube_state
 from dagster_cube_dbt.generation import generate_cubes
 from dagster_cube_dbt.landing_check import CubeRestApiClient, wait_for_landing, with_landing_check_meta
-from dagster_cube_dbt.merge import discover_patch_files, merge_documents, resolve_extends
+from dagster_cube_dbt.merge import (
+    check_joined_cubes_have_primary_keys,
+    discover_patch_files,
+    merge_documents,
+    resolve_extends,
+)
 from dagster_cube_dbt.output import write_entities
 
 DEFS_YAML_FILENAME = "defs.yaml"
@@ -447,6 +452,7 @@ class CubeDbtProjectComponent(DbtProjectComponent):
             for patch_file in discover_patch_files(self._defs_dir, exclude=exclude)
         ]
         merged = merge_documents(base, patches)
+        check_joined_cubes_have_primary_keys(merged.get("cubes") or [])
         write_cube_state(state_path, merged)
 
     def prepare_state_aware_lookup(self, state_path: Path | None) -> dict[str, Any]:
